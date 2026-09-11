@@ -12,7 +12,7 @@ Volatile-First Autonomous Coding Harness for Android PRoot | Claude Code Executa
 
 ABSTRACT — EXECUTABLE SPEC
 
-This spec merges Papers 1-4 into a single buildable document. Contains exact file tree, ETS/DuckDB/KùzuDB schemas, pseudocode, APIs, config templates, performance targets, and implementation order. Paste entire spec into Claude Code with prompt `“Build Kilas v2.0 exactly per this spec, file by file, no shortcuts”`. No bash sh -c loops. All heavy compilers via persistent Ports, fast path 100% BEAM-native.
+This spec merges Papers 1-4 into a single buildable document. Contains exact file tree, ETS/DuckDB/libgraph schemas, pseudocode, APIs, config templates, performance targets, and implementation order. Paste entire spec into Claude Code with prompt `“Build Kilas v2.0 exactly per this spec, file by file, no shortcuts”`. No bash sh -c loops. All heavy compilers via persistent Ports, fast path 100% BEAM-native.
 
 Invariants: Volatile-First (work in tmpfs), Zero-Fork (≤1 fork/min), Single-Writer (CodeWriter singleton), Language-Agnostic (Tree-sitter + GenericAdapter).
 
@@ -26,7 +26,7 @@ TABLE OF CONTENTS
 
 2. File Tree — Exact Structure
 
-3. Data Schemas — ETS / DuckDB / KùzuDB
+3. Data Schemas — ETS / DuckDB / libgraph
 
 4. Core Algorithms — Pseudocode
 
@@ -62,7 +62,7 @@ All work in /tmp/kilas tmpfs 1GB. Physical disk is only touched by Housekeeper S
 
 Zero-Fork Loop
 
-90% BEAM-native: ETS (MemGit, locks, bindings), DuckDB (AST), KùzuDB (graph), Tree-sitter NIF (Rustler dirty_cpu), Finch (HTTP). 10% persistent Ports: go, cargo, gradle, mix test — started once, reused via Port.command. Target: ≤1 fork/min on Poco F5 Pro.
+90% BEAM-native: ETS (MemGit, locks, bindings), DuckDB (AST + graph edges), libgraph (BEAM-memory graph), Tree-sitter NIF (Rustler dirty_cpu), Finch (HTTP). 10% persistent Ports: go, cargo, gradle, mix test — started once, reused via Port.command. Target: ≤1 fork/min on Poco F5 Pro.
 
 - › PersistentPort: Port.open({:spawn_executable, bin}, cd: cwd)
 
@@ -101,7 +101,7 @@ DIAGRAM 01 — VOLATILE-FIRST DATA PATH
 **Diagram (viewBox 780x180):**
 - Agent / TUI → CodeWriter → /tmp/kilas tmpfs 1G → Housekeeper → Physical
 - open, edit, ask → Singleton + ETS lock → All File I/O • 0.05ms → 60s tick • WAL → atomic rename
-- MemGit ETS :memgit_*  +  DuckDB ast_nodes  +  KùzuDB graph
+- MemGit ETS :memgit_*  +  DuckDB ast_nodes  +  graph_edges + libgraph
 - commit <0.5ms • BlastRadius <2ms • No disk
 
 14 INTERACTIONS — 6 LAYERS (Code, Runtime, Environment, Knowledge, Collaboration, Deploy)
@@ -124,15 +124,15 @@ Claude must create exactly this tree. No extra folders. mix.exs deps pinned. Tem
 
 ```text
 kilas/
-├── mix.exs (deps: ex_tree_sitter, rustler 0.32, duckdbex 0.3.7, kuzu 0.1.0-elixir-bind, finch 0.19, req 0.5, jason 1.4, owl 0.12, ratatouille 0.5 [optional])
+├── mix.exs (deps: ex_tree_sitter, rustler 0.32, duckdbex 0.3.7, libgraph 0.16, finch 0.19, req 0.5, jason 1.4, owl 0.12, ratatouille 0.5 [optional])
 ├── .kilas.json (template registry: {"go": "templates/go.json", ...})
 ├── lib/kilas/
-│   ├── application.ex (Supervisor: TmpfsManager, MemGit, DuckDBServer, KuzuServer, TreeSitterServer, ShadowRegistry, CodeWriter.Coordinator, Housekeeper, Router)
+│   ├── application.ex (Supervisor: TmpfsManager, MemGit, DuckDBServer, GraphServer, TreeSitterServer, ShadowRegistry, CodeWriter.Coordinator, Housekeeper, Router)
 │   ├── storage/
 │   │   ├── tmpfs_manager.ex (mount /tmp/kilas, 1GB, recover_from_disk)
 │   │   ├── memgit.ex (ETS :memgit_commits, :memgit_trees, :memgit_blobs, commit/log/diff/status/rollback)
 │   │   ├── duckdb_server.ex (AST nodes, parent context envelope, FTS)
-│   │   ├── kuzu_server.ex (graph CALLS, TESTED_BY, DEPENDS_ON, HAS_VULN)
+│   │   ├── graph_server.ex (project graph_edges into libgraph: CALLS, TESTED_BY, DEPENDS_ON, IMPORTS, HAS_VULN, MODIFIED_IN)
 │   │   └── housekeeper.ex (60s ShadowSync atomic rsync + WAL shadow.journal + git push via persistent Port)
 │   ├── compiler/
 │   │   ├── shadow_registry.ex (get_adapter via .kilas.json + auto-detect)
@@ -146,7 +146,7 @@ kilas/
 │   │   ├── parent_context.ex (envelope: file, imports, surrounding class/func, 5 lines before/after)
 │   │   └── policy_gate.ex (pre-flight <1ms, reject anti-patterns from anti_patterns.json, return fix suggestion)
 │   ├── tia/
-│   │   ├── blast_radius.ex (get_impacted_tests node_id via KùzuDB CALLS* MATCH)
+│   │   ├── blast_radius.ex (get_impacted_tests node_id via GraphServer bounded BFS depth≤5)
 │   │   ├── test_runner.ex (run only impacted tests via GenericAdapter template.test_targeted)
 │   │   └── focused_signal.ex (parse test output to 200 token hint, not wall of text)
 │   ├── code_writer/
@@ -155,11 +155,11 @@ kilas/
 │   │   └── lock_manager.ex (ETS :ast_locks, lock per function, not file, TTL 30s)
 │   ├── interrogation/
 │   │   ├── router.ex (intent classification: query, generate, debug, profile, env, security, survival, tutor, collab, deploy, repl, open, edit)
-│   │   ├── query_engine.ex (GraphRAG over DuckDB+KùzuDB, <10ms, parent_context)
+│   │   ├── query_engine.ex (GraphRAG over DuckDB+libgraph, <10ms, parent_context)
 │   │   ├── debug_engine.ex (get_runtime_value from last failed run bindings stored in ETS :runtime_bindings)
 │   │   ├── profile_engine.ex (fprof / go pprof / cargo flamegraph in tmpfs, store in DuckDB)
 │   │   ├── env_doctor.ex (EnvGraph error regex -> apt package -> install via Port)
-│   │   ├── security_engine.ex (vuln traversal Package->CVE via KùzuDB)
+│   │   ├── security_engine.ex (vuln traversal Package->CVE via libgraph)
 │   │   ├── survival_engine.ex (nand_writes, battery, oom_risk gauges, thermal)
 │   │   ├── tutor_engine.ex (explain as story + mermaid diagram string)
 │   │   └── collab_engine.ex (MemGit timeline + lock reservations)
@@ -203,7 +203,7 @@ mix new kilas --sup first
 
 Supervisor order critical
 
-## 03 — Data Schemas — ETS / DuckDB / KùzuDB
+## 03 — Data Schemas — ETS / DuckDB / libgraph
 
 DuckDB — ast_nodes
 
@@ -240,55 +240,66 @@ CREATE INDEX idx_lang ON ast_nodes(language);
 -- }
 ```
 
-KùzuDB Graph Schema
+Graph Tier — DuckDB Edge Tables (durable) + libgraph (BEAM memory)
 
-```cypher
-// Nodes
-CREATE NODE TABLE ASTNode(
-  id STRING PRIMARY KEY,
-  filepath STRING,
-  symbol STRING,
-  type STRING,
-  language STRING
+DuckDB stores the graph as plain rows: one edge table plus typed attribute
+tables (`ast_nodes` from §3 above is the vertex source for code nodes). At
+boot, GraphServer projects `graph_edges` into a `%Graph{}` (libgraph) held in
+BEAM memory — traversals are pure Elixir, no graph DB process, no extra NIF.
+
+```sql
+-- Attribute tables (durable, DuckDB)
+CREATE TABLE test_nodes (
+  id TEXT PRIMARY KEY,    -- filepath::TestFunc
+  filepath TEXT NOT NULL,
+  line INT
 );
 
-CREATE NODE TABLE TestNode(
-  id STRING PRIMARY KEY, // filepath::TestFunc
-  filepath STRING,
-  line INT64
+CREATE TABLE packages (
+  name TEXT PRIMARY KEY,
+  version TEXT,
+  ecosystem TEXT          -- go, cargo, maven, npm, hex
 );
 
-CREATE NODE TABLE Package(
-  name STRING PRIMARY KEY,
-  version STRING,
-  ecosystem STRING // go, cargo, maven, npm, hex
-);
-
-CREATE NODE TABLE Vulnerability(
-  cve STRING PRIMARY KEY,
-  severity STRING, // critical, high, medium
+CREATE TABLE vulnerabilities (
+  cve TEXT PRIMARY KEY,
+  severity TEXT,          -- critical, high, medium
   cvss DOUBLE,
-  description STRING
+  description TEXT
 );
 
-CREATE NODE TABLE Commit(
-  hash STRING PRIMARY KEY,
-  message STRING,
-  timestamp INT64
+CREATE TABLE commits (
+  hash TEXT PRIMARY KEY,
+  message TEXT,
+  ts INT
 );
 
-// Edges
-CREATE REL TABLE CALLS(FROM ASTNode TO ASTNode, count INT64, MANY_MANY);
-CREATE REL TABLE TESTED_BY(FROM ASTNode TO TestNode, MANY_MANY);
-CREATE REL TABLE DEPENDS_ON(FROM ASTNode TO Package, MANY_MANY);
-CREATE REL TABLE HAS_VULN(FROM Package TO Vulnerability, MANY_MANY);
-CREATE REL TABLE MODIFIED_IN(FROM ASTNode TO Commit, MANY_MANY);
-CREATE REL TABLE IMPORTS(FROM ASTNode TO Package, MANY_MANY);
+-- One edge table; src/dst reference ids from ast_nodes, test_nodes,
+-- packages, vulnerabilities, commits
+CREATE TABLE graph_edges (
+  label TEXT NOT NULL,    -- CALLS | TESTED_BY | DEPENDS_ON | IMPORTS | HAS_VULN | MODIFIED_IN
+  src   TEXT NOT NULL,
+  dst   TEXT NOT NULL,
+  count INT DEFAULT 1
+);
 
-// Query: Blast Radius
-// MATCH (n:ASTNode {id: $node_id})<-[:CALLS*1..5]-(caller:ASTNode)
-// MATCH (caller)-[:TESTED_BY]->(test:TestNode)
-// RETURN DISTINCT test.id, test.filepath
+CREATE INDEX idx_edges_src ON graph_edges(src);
+CREATE INDEX idx_edges_dst ON graph_edges(dst);
+```
+
+```elixir
+# GraphServer: project graph_edges into libgraph at boot (and on ShadowSync replay)
+rows = DuckDBServer.query("SELECT label, src, dst FROM graph_edges", [])
+
+graph =
+  Enum.reduce(rows, Graph.new(), fn %{label: l, src: s, dst: d}, g ->
+    g |> Graph.add_vertex(s) |> Graph.add_vertex(d) |> Graph.add_edge(s, d, label: l)
+  end)
+
+# Query: Blast Radius — reverse bounded BFS (depth <= 5) over CALLS edges,
+# then TESTED_BY join (see 4.3). Invariant: in_neighbors of an AST node are
+# exactly its CALLS callers — every other edge label ends at a non-AST vertex
+# (TestNode / Package / Vulnerability / Commit).
 ```
 
 ETS Tables — In-Memory Only
@@ -338,7 +349,7 @@ ETS Tables — In-Memory Only
 
 PERFORMANCE INVARIANT
 
-ETS read <0.01ms • MemGit commit <0.5ms • KùzuDB CALLS* traversal <2ms • DuckDB point query <1ms
+ETS read <0.01ms • MemGit commit <0.5ms • libgraph CALLS BFS depth≤5 <2ms (benchmark required) • DuckDB point query <1ms
 
 ## 04 — Core Algorithms — Pseudocode
 
@@ -436,7 +447,7 @@ defmodule Kilas.CodeWriter.Coordinator do
                 # 5. MemGit ETS commit <0.5ms
                 Kilas.Storage.MemGit.commit(filepath, "edit #{node_id}", agent_id)
 
-                # 6. TIA Blast Radius KùzuDB <2ms
+                # 6. TIA Blast Radius libgraph BFS <2ms
                 impacted = Kilas.TIA.BlastRadius.get_impacted_tests(node_id)
 
                 # 7. Test only impacted via persistent Port
@@ -465,29 +476,48 @@ end
 
 4.3
 
-TIA Blast Radius — KùzuDB CALLS* Transitive
+TIA Blast Radius — libgraph Bounded Reverse BFS
 
-DIRTY_CPU NIF • ETS • <1ms
+BEAM-native (pure Elixir, no NIF) • GraphServer projection • <2ms target
 
 ```elixir
 defmodule Kilas.TIA.BlastRadius do
-  # Returns list of TestNode ids impacted by change to node_id
+  # Returns list of TestNode ids impacted by change to node_id.
+  # Equivalent of: MATCH (n)<-[:CALLS*1..5]-(caller), (caller)-[:TESTED_BY]->(t)
+  # UNION MATCH (n)-[:TESTED_BY]->(direct) — see §3 graph tier.
+
+  @max_depth 5
 
   def get_impacted_tests(node_id) do
-    query = """
-    MATCH (n:ASTNode {id: $node_id})<-[:CALLS*1..5]-(caller:ASTNode)
-    MATCH (caller)-[:TESTED_BY]->(test:TestNode)
-    RETURN DISTINCT test.id as test_id, test.filepath as filepath
-    UNION
-    MATCH (n:ASTNode {id: $node_id})-[:TESTED_BY]->(direct:TestNode)
-    RETURN DISTINCT direct.id as test_id, direct.filepath as filepath
-    """
+    g = Kilas.Storage.GraphServer.graph()
 
-    Kilas.Storage.KuzuServer.query(query, %{node_id: node_id})
-    |> Enum.map(fn row -> row["test_id"] end)
+    # node_id itself (direct tests) + all CALLS callers within depth 5
+    touched = callers_incl_self(g, MapSet.new([node_id]), MapSet.new([node_id]), 0)
+
+    touched
+    |> Enum.flat_map(fn v ->
+      g |> Graph.out_edges(v) |> Enum.filter(&(&1.label == :tested_by)) |> Enum.map(& &1.v2)
+    end)
+    |> Enum.uniq()
   end
 
-  # Fallback if Kùzu not ready: file-level via DuckDB parent_context
+  # Iterative BFS; each vertex expanded at most once (seen set)
+  defp callers_incl_self(_g, _frontier, seen, d) when d >= @max_depth, do: seen
+
+  defp callers_incl_self(g, frontier, seen, d) do
+    next =
+      frontier
+      |> Enum.flat_map(&Graph.in_neighbors(g, &1))
+      |> MapSet.new()
+      |> MapSet.difference(seen)
+
+    case MapSet.size(next) do
+      0 -> seen
+      _ -> callers_incl_self(g, next, MapSet.union(seen, next), d + 1)
+    end
+  end
+
+  # Fallback if GraphServer not ready: file-level via DuckDB parent_context
   def fallback_file_tests(filepath) do
     Kilas.Storage.DuckDBServer.query("SELECT id FROM ast_nodes WHERE filepath = ? AND node_type LIKE '%test%'", [filepath])
   end
@@ -724,7 +754,7 @@ DIAGRAM 02 — ZERO-FORK LOOP ARCHITECTURE
 - 1. Agent reserves ETS lock
 - DuckDB ast_nodes <1ms → cargo test (1 port)
 - 2. PolicyGate check + fix hint
-- KùzuDB CALLS* <2ms → gradle (1 port)
+- libgraph CALLS BFS <2ms → gradle (1 port)
 - 3. binary_part patch /tmp/kilas
 - Tree-sitter NIF dirty_cpu → mix test (1 port)
 - 4. Tree-sitter NIF parse
@@ -738,12 +768,12 @@ DIAGRAM 02 — ZERO-FORK LOOP ARCHITECTURE
 
 | INTENT | EXAMPLE QUERY | INTERNAL FLOW | LATENCY / FORKS |
 |---|---|---|---|
-| Query | "How to add login?" | Router → QueryEngine GraphRAG DuckDB+KùzuDB → parent_context envelope → answer + file:line | <10ms • 0 fork |
+| Query | "How to add login?" | Router → QueryEngine GraphRAG DuckDB+libgraph → parent_context envelope → answer + file:line | <10ms • 0 fork |
 | Generate | "Add hash_password()" | CodeWriter reserve lock → PolicyGate → tmpfs patch → TreeSitter check → MemGit ETS → TIA 2 tests 8-25ms | <25ms TIA • 0 fork if no test |
 | Debug | "Why user_id nil at auth.ex:42?" | DebugEngine ETS :runtime_bindings lookup node_id → stacktrace + history + last values | <15ms • 0 fork |
 | Profile | "Why login slow?" | ProfileEngine fprof/go pprof/cargo flamegraph in /tmp/kilas_lab RAM → DuckDB store → 80% hash_password | <100ms profile • 1 fork |
 | Env Fix | "Fix my env" | EnvDoctor EnvGraph error regex → apt package → install via persistent Port → retry compile | <5s apt • 1 fork |
-| Security | "Is this safe?" | SecurityEngine KùzuDB traversal ASTNode→DEPENDS_ON→Package→HAS_VULN→Vuln | <10ms • 0 fork |
+| Security | "Is this safe?" | SecurityEngine libgraph 2-hop traversal ASTNode→DEPENDS_ON→Package→HAS_VULN→Vuln | <10ms • 0 fork |
 | Survival | "Will this survive OOM?" | SurvivalEngine gauges: nand_writes, battery, oom_risk, thermal from /sys | <5ms • 0 fork |
 | Tutor | "Explain auth as story" | TutorEngine simplified graph + mermaid diagram + parent_context story | <10ms • 0 fork |
 | REPL | "What if algo=:sha3?" | LiveLab IEx persistent Port in /tmp/kilas_lab RAM eval no commit | <20ms • 0 fork (port reuse) |
@@ -860,7 +890,7 @@ defmodule Kilas.MixProject do
     [
       {:rustler, "~> 0.32.0"},
       {:duckdbex, "~> 0.3.7"}, # AST storage
-      {:kuzu, "~> 0.1.0", git: "https://github.com/kuzudb/kuzu-elixir", branch: "main"},
+      {:libgraph, "~> 0.16"}, # BEAM-memory graph projection
       {:finch, "~> 0.19.0"}, # HTTP, no curl fork
       {:req, "~> 0.5.0"}, # wrapper over Finch
       {:jason, "~> 1.4"},
@@ -982,7 +1012,7 @@ Create project, add deps to mix.exs, create priv/templates, priv/policies. mix d
 
 Storage layer first
 
-TmpfsManager (mount /tmp/kilas, recover_from_disk), MemGit ETS (3 tables, commit/log/diff/status/rollback), DuckDBServer (create ast_nodes table, insert/query), KuzuServer (create nodes/edges), Housekeeper skeleton (60s timer, no sync yet). Test: test/tmpfs_manager_test.exs, memgit_test.exs must pass.
+TmpfsManager (mount /tmp/kilas, recover_from_disk), MemGit ETS (3 tables, commit/log/diff/status/rollback), DuckDBServer (create ast_nodes table, insert/query), GraphServer (project graph_edges into libgraph), Housekeeper skeleton (60s timer, no sync yet). Test: test/tmpfs_manager_test.exs, memgit_test.exs must pass.
 
 3
 
@@ -994,7 +1024,7 @@ TreeSitterServer NIF via Rustler (native/tree_sitter_nif/src/lib.rs, cargo, pars
 
 TIA layer
 
-BlastRadius (KùzuDB query MATCH CALLS*), TestRunner (GenericAdapter integration), FocusedSignal (parse output to 200 token hint). Test: test/blast_radius_test.exs with sample graph A->B->C, C changed => tests for A,B returned.
+BlastRadius (GraphServer bounded BFS CALLS depth≤5), TestRunner (GenericAdapter integration), FocusedSignal (parse output to 200 token hint). Test: test/blast_radius_test.exs with sample graph A->B->C, C changed => tests for A,B returned.
 
 5
 
@@ -1012,7 +1042,7 @@ Coordinator singleton {:global, __MODULE__}, LockManager ETS :ast_locks TTL 30s,
 
 Interrogation layer
 
-Router intent classification regex, QueryEngine GraphRAG DuckDB+KùzuDB <10ms + parent_context, DebugEngine ETS :runtime_bindings, ProfileEngine fprof/go pprof/cargo flamegraph in /tmp/kilas_lab, EnvDoctor EnvGraph regex->apt, SecurityEngine Package->Vuln traversal, SurvivalEngine gauges /sys, TutorEngine story+mermaid, CollabEngine timeline+locks. Test: each engine unit test.
+Router intent classification regex, QueryEngine GraphRAG DuckDB+libgraph <10ms + parent_context, DebugEngine ETS :runtime_bindings, ProfileEngine fprof/go pprof/cargo flamegraph in /tmp/kilas_lab, EnvDoctor EnvGraph regex->apt, SecurityEngine Package->Vuln traversal, SurvivalEngine gauges /sys, TutorEngine story+mermaid, CollabEngine timeline+locks. Test: each engine unit test.
 
 8
 
@@ -1052,18 +1082,18 @@ After each layer: mix test. After storage: tmpfs read <0.05ms, MemGit commit <0.
 
 | OPERATION | TARGET | FORKS | NOTES |
 |---|---|---|---|
-| Query (GraphRAG) | <10ms | 0 | DuckDB FTS + KùzuDB CALLS* + parent_context envelope |
+| Query (GraphRAG) | <10ms | 0 | DuckDB FTS + libgraph CALLS BFS + parent_context envelope |
 | Generate (TIA) | <25ms | 0 (or 1 if tests) | ETS lock + PolicyGate <1ms + binary_part + Tree-sitter NIF + MemGit + BlastRadius |
 | Debug (bindings) | <15ms | 0 | ETS :runtime_bindings lookup + MemGit history |
 | Profile (fprof/pprof) | <100ms | 1 | Profile in /tmp/kilas_lab RAM, store flame in DuckDB |
 | Env fix (apt) | <5s | 1 | EnvGraph regex → apt via persistent Port, reuse port |
-| Security (CVE traversal) | <10ms | 0 | KùzuDB Package->HAS_VULN->Vuln |
+| Security (CVE traversal) | <10ms | 0 | libgraph Package->HAS_VULN->Vuln 2-hop |
 | Survival gauges | <5ms | 0 | Read /sys/class/power_supply, /proc/meminfo, thermal_zone |
 | Tutor (story+mermaid) | <10ms | 0 | Simplified graph + precomputed parent_context |
 | MemGit commit | <0.5ms | 0 | ETS insert only, no disk |
 | tmpfs read | <0.05ms | 0 | File.read! from tmpfs |
 | Tree-sitter parse (1 file) | <5ms | 0 | Rustler NIF dirty_cpu, not CLI |
-| BlastRadius | <2ms | 0 | KùzuDB CALLS*1..5 transitive |
+| BlastRadius | <2ms | 0 | libgraph CALLS BFS depth≤5 (benchmark required) |
 | ShadowSync 60s | ~200ms | 1 (git push) | Atomic rsync + WAL, not during loop |
 | Forks/min | <1 | — | Persistent Ports reuse, Finch no fork, NIF no fork |
 | Battery | <5%/hr | — | BEAM 512MB limit, no busy loop, Housekeeper pause <20% |
@@ -1102,7 +1132,7 @@ OOM HANDLING — BEAM HEART
 
 • On restart: TmpfsManager.recover_from_disk() rsync physical → tmpfs
 
-• ETS tables recreated, DuckDB/KùzuDB reopen from /tmp/kilas/.kilas_db (tmpfs but WAL in physical)
+• ETS tables recreated, DuckDB reopen from /tmp/kilas/.kilas_db (tmpfs but WAL in physical); GraphServer rebuilds libgraph from graph_edges
 
 • No data loss: last ShadowSync max 60s ago
 
@@ -1140,7 +1170,7 @@ NAND PROTECTION
 
 • WAL shadow.journal batched, not per commit
 
-• DuckDB/KùzuDB files in tmpfs, flushed only on ShadowSync
+• DuckDB files in tmpfs, flushed only on ShadowSync (libgraph held in BEAM memory, rebuilt on boot)
 
 • Git push via Port, not shell loop
 
@@ -1178,7 +1208,7 @@ test/
 │   └── lock reservation, MemGit timeline
 ├── all_interaction_test.exs
 │   └── Full loop: Query->Generate->TIA->Debug->Push
-└── test_helper.exs (setup tmpfs, ETS, DuckDB, Kùzu)
+└── test_helper.exs (setup tmpfs, ETS, DuckDB, GraphServer)
 
 # Each test must use /tmp/kilas, not physical
 # mix test --trace should show <50ms per interaction
@@ -1249,10 +1279,10 @@ DIAGRAM 03 — FULL LAYER MAP
 - CodeWriter — Singleton
 - Coordinator + Patcher binary_part + LockManager ETS
 - TIA + AST + Compiler
-- BlastRadius KùzuDB, TreeSitter NIF, GenericAdapter, Persis
+- BlastRadius GraphServer, TreeSitter NIF, GenericAdapter, Persis
 - tentPort, ShadowRegistry
 - Storage — Volatile-First
-- TmpfsManager 1GB, MemGit ETS, DuckDB ast_nodes, KùzuDB gra
+- TmpfsManager 1GB, MemGit ETS, DuckDB ast_nodes + graph_edges, libgraph gra
 - ph, Housekeeper 60s ShadowSync
 
 EXECUTABLE PROMPT — COPY PASTE TO CLAUDE CODE
@@ -1262,15 +1292,15 @@ You are building Kilas v2.0 exactly per this spec. Build file by file in order S
 
 INVARIANTS:
 - Volatile-First: /tmp/kilas tmpfs 1GB, recover_from_disk()
-- Zero-Fork: ≤1 fork/min, 90% ETS/DuckDB/KùzuDB/NIF/Finch, 10% persistent Ports
+- Zero-Fork: ≤1 fork/min, 90% ETS/DuckDB/libgraph/NIF/Finch, 10% persistent Ports
 - Single-Writer: CodeWriter GenServer singleton {:global}, ETS :ast_locks per function TTL 30s
 - Language Agnostic: Tree-sitter NIF + .kilas.json + GenericAdapter EEx + auto-detect go.mod/Cargo.toml/build.gradle/mix.exs/package.json
 
 BUILD ORDER:
 1. mix new kilas --sup, deps, priv/templates, priv/policies
-2. storage layer: TmpfsManager, MemGit ETS 3 tables, DuckDBServer ast_nodes, KuzuServer graph, Housekeeper skeleton
+2. storage layer: TmpfsManager, MemGit ETS 3 tables, DuckDBServer ast_nodes + graph_edges, GraphServer libgraph projection, Housekeeper skeleton
 3. ast layer: TreeSitterServer Rustler NIF dirty_cpu, Granularity, ParentContext envelope, PolicyGate <1ms anti_patterns.json
-4. tia layer: BlastRadius KùzuDB CALLS*1..5, TestRunner GenericAdapter, FocusedSignal 200 token hint
+4. tia layer: BlastRadius libgraph CALLS BFS depth≤5, TestRunner GenericAdapter, FocusedSignal 200 token hint
 5. compiler layer: ShadowRegistry auto-detect, GenericAdapter EEx, PersistentPort Port.open spawn_executable reuse, ShadowServer
 6. code_writer layer: Coordinator singleton reserve_ast_lock apply_surgical_patch binary_part, Patcher, LockManager
 7. interrogation layer: Router intent + 8 engines QueryEngine GraphRAG <10ms, DebugEngine :runtime_bindings, ProfileEngine fprof/pprof tmpfs, EnvDoctor regex->apt->Port, SecurityEngine Package->Vuln, SurvivalEngine gauges, TutorEngine story+mermaid, CollabEngine timeline
@@ -1319,7 +1349,7 @@ All edits in /tmp/kilas tmpfs, 1GB. Physical only via Housekeeper 60s atomic rsy
 
 Zero-Fork Guarantee
 
-90% BEAM-native: ETS MemGit <0.5ms, DuckDB <1ms, KùzuDB <2ms, Tree-sitter NIF dirty_cpu, Finch. 10% persistent Ports: go/cargo/gradle/mix/git/apt each 1 Port.open, reuse forever. ≤1 fork/min.
+90% BEAM-native: ETS MemGit <0.5ms, DuckDB <1ms, libgraph <2ms, Tree-sitter NIF dirty_cpu, Finch. 10% persistent Ports: go/cargo/gradle/mix/git/apt each 1 Port.open, reuse forever. ≤1 fork/min.
 
 Single-Writer Guarantee
 
