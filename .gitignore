@@ -1,0 +1,4 @@
+.tools/duckdb
+.tools/bench/data/
+.tools/bench/progress.log
+.tools/bench/run_*.sql
