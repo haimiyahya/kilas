@@ -11,13 +11,13 @@
 | **Date** | December 2024 · Kuala Lumpur |
 | **Series position** | Source artifact header reads "Paper 2 / 3" and footer "Paper 2 of 3". This conflicts with Paper 1 ("Paper 1 of 4") and the stated 4-paper plan. Flagged at extraction — not corrected. |
 | **Keywords** | Conversational Codebases · DuckDB · libgraph · MemGit · Chesterton's Fence · BEAM · Agentic RAG |
-| **Source** | Extracted from a React artifact (pasted 2026-09-11) into Markdown. Figures were SVG diagrams in the source; they appear here as placeholders with their text content transcribed. Content transcribed as-is — no corrections applied yet. Storage revised 2026-09-11: KùzuDB references updated to the DuckDB + libgraph architecture adopted in kilas-spec-v2. |
+| **Source** | Extracted from a React artifact (pasted 2026-09-11) into Markdown. Figures were SVG diagrams in the source; they appear here as placeholders with their text content transcribed. Content transcribed as-is — no corrections applied yet. Storage revised 2026-09-11: KùzuDB references updated to the DuckDB + libgraph architecture adopted in kilas-spec-v2; performance claims scoped 2026-09-11 to AST-measured BFS benchmarks (≈0.7ms per 1k edges, Poco-class ARM). |
 
 ---
 
 ## Abstract
 
-Autonomous coding agents operating on large repositories fail not due to weak reasoning, but due to **structural inspection**. Current approaches force agents to reconstruct architecture from raw text via grep, vector search, and embedding retrieval—dumping 50k–120k tokens of fragmented files into context, triggering window inflation, architectural drift, and historical blindness. We introduce **Conversational Codebases**, a protocol shift from inspection to interrogation: the codebase becomes an active interlocutor backed by a multi-tier knowledge graph (Property Graph + Temporal Memory + Vector Index) that negotiates architectural intent, enforces style policies, and preserves institutional memory. Our implementation pairs embedded DuckDB edge tables with an in-process libgraph projection for AST call graphs and spec relationships, MemGit lineage for commit provenance and stripped-comment recovery, and in-memory HNSW for intent mapping—all within the agent process with <2ms query latency. Evaluation on 120 architectural tasks shows a **96.2% token reduction** (85k → 3.2k) and **2.8× improvement** in first-turn completion (32% → 92%), while historical regression rate drops from 18.4% to <0.5% via Chesterton's Fence enforcement. The codebase no longer needs to be read; it can be asked.
+Autonomous coding agents operating on large repositories fail not due to weak reasoning, but due to **structural inspection**. Current approaches force agents to reconstruct architecture from raw text via grep, vector search, and embedding retrieval—dumping 50k–120k tokens of fragmented files into context, triggering window inflation, architectural drift, and historical blindness. We introduce **Conversational Codebases**, a protocol shift from inspection to interrogation: the codebase becomes an active interlocutor backed by a multi-tier knowledge graph (Property Graph + Temporal Memory + Vector Index) that negotiates architectural intent, enforces style policies, and preserves institutional memory. Our implementation pairs embedded DuckDB edge tables with an in-process libgraph projection for AST call graphs and spec relationships, MemGit lineage for commit provenance and stripped-comment recovery, and in-memory HNSW for intent mapping—all within the agent process with <2ms query latency at core-graph scale (≤~2k edges); worst-case full-repo traversal measured at ~6.6ms on a ~360k-LOC polyglot codebase (~10k edges). Evaluation on 120 architectural tasks shows a **96.2% token reduction** (85k → 3.2k) and **2.8× improvement** in first-turn completion (32% → 92%), while historical regression rate drops from 18.4% to <0.5% via Chesterton's Fence enforcement. The codebase no longer needs to be read; it can be asked.
 
 ---
 
@@ -42,7 +42,7 @@ We propose inverting the relationship: instead of the agent inspecting the codeb
 
 ## 2. Multi-Tier Knowledge Graph Architecture
 
-A conversational codebase must answer three distinct questions simultaneously: *What calls what?* (structure), *Why was it written?* (history), and *What did the human mean?* (intent). No single index suffices. We therefore embed three specialized engines inside the agent process, federated via BEAM's actor model for <2ms traversal.
+A conversational codebase must answer three distinct questions simultaneously: *What calls what?* (structure), *Why was it written?* (history), and *What did the human mean?* (intent). No single index suffices. We therefore embed three specialized engines inside the agent process, federated via BEAM's actor model for <2ms traversal at core-graph scale (≤~2k edges; ~6.6ms at full-repo scale, ~10k edges).
 
 > **Figure 2 — Multi-Tier Knowledge Graph** *(SVG placeholder; "Embedded Intelligence · No External Dependencies")*
 >
@@ -184,12 +184,12 @@ We evaluated on 120 architectural tasks across Elixir, Python, and TypeScript re
 
 | Performance Metric | Traditional Inspection (Grep / Vector RAG) | Conversational Codebase Protocol |
 |---|---|---|
-| Context Query Latency | 3,000–15,000 ms | **<2 ms** (in-process) |
+| Context Query Latency | 3,000–15,000 ms | **<2 ms** (in-process, core graphs ≤~2k edges); ~6.6 ms measured worst-case full-repo (~10k edges) |
 | Token Overhead | 50k–120k | **1.5k–4k** · 96.2% ↓ |
 | First-Turn Completion | 32% | **92%** · 2.8× ↑ |
 | Historical Regression Rate | 18.4% | **<0.5%** · Chesterton guard |
 
-Notes: All measurements on-device, Poco F5 Pro (Snapdragon 8+ Gen 1, 12GB). No network calls during task execution. DuckDB embedded, libgraph in-memory, HNSW in-memory, libgit2 via Rust NIF.
+Notes: All measurements on-device, Poco F5 Pro (Snapdragon 8+ Gen 1, 12GB). No network calls during task execution. DuckDB embedded, libgraph in-memory, HNSW in-memory, libgit2 via Rust NIF. Latency scoping per AST-measured benchmark (2026-09-11): BFS <2ms at ≤~2k edges, ~6.6ms p50 at ~10k edges (361k-LOC polyglot Go codebase).
 
 **System Impact Summary:** The conversational protocol collapses retrieval from "find files" to "decide architecture." By moving policy enforcement and historical reasoning into the codebase itself, we eliminate prompt stuffing and enable agents to generate correct code on the first turn without exploratory grep loops. The 96.2% token reduction is not compression—it is the removal of irrelevant data that should never have entered the context.
 
@@ -199,7 +199,7 @@ Notes: All measurements on-device, Poco F5 Pro (Snapdragon 8+ Gen 1, 12GB). No n
 
 Codebases have always contained more knowledge than their text: call graphs, style policies, commit histories, and stripped rationales. Traditional agents ignore this latent structure and pay with tokens, accuracy, and regressions. Conversational Codebases make that structure queryable.
 
-Our three-tier graph—Property Graph (DuckDB + libgraph), Temporal Memory (MemGit), Vector Intent (HNSW)—transforms the repository from a file store into a negotiating peer. It does not dump files; it answers "how should this be built?" with blast-radius analysis, policy-compliant templates, and historical justification. On a constrained 12GB device, this yields <2ms queries, 96.2% token savings, and near-zero historical regressions.
+Our three-tier graph—Property Graph (DuckDB + libgraph), Temporal Memory (MemGit), Vector Intent (HNSW)—transforms the repository from a file store into a negotiating peer. It does not dump files; it answers "how should this be built?" with blast-radius analysis, policy-compliant templates, and historical justification. On a constrained 12GB device, this yields <2ms queries at core-graph scale (~6.6ms worst-case full-repo), 96.2% token savings, and near-zero historical regressions.
 
 **Future Work:** Paper 3 will explore collaborative interrogation where multiple agents negotiate over the same codebase graph, requiring conflict resolution and distributed style policy consensus via CRDTs. We will also open-source the BEAM router and the DuckDB–libgraph projection layer.
 
@@ -217,4 +217,4 @@ Our three-tier graph—Property Graph (DuckDB + libgraph), Temporal Memory (MemG
 
 *Source footer: "Kilas Project · Conversational Codebases · Paper 2 of 3 · © 2024 Mohd Norhaimi Bin Yahya" · "Built on Poco F5 Pro 12GB Lab · No external dependencies"*
 
-*Known gaps to revisit (flagged at extraction, not yet fixed): figure diagrams (placeholders only); verification of references/benchmarks; series-position conflict ("Paper 2 of 3" here vs "Paper 1 of 4" in Paper 1 and the stated 4-paper plan); latency inconsistency (abstract/§2/§4 say <2ms but the Property Graph tier is listed at 3–8ms); Commit table DDL bug in the source (declared `hash`, keyed on `id`) fixed in the DuckDB rewrite above; template name differs between the JSON-RPC response (`hash_password(pwd, :sha3)`) and Figure 3 (`hash_pwd(pwd)`); Paper 1 named Paper 2 topics as "InterrogationRouter strategies, knowledge graph distillation, long-horizon planning" — this paper covers intent negotiation but not knowledge-graph distillation or long-horizon planning.*
+*Known gaps to revisit (flagged at extraction, not yet fixed): figure diagrams (placeholders only); verification of references/benchmarks; series-position conflict ("Paper 2 of 3" here vs "Paper 1 of 4" in Paper 1 and the stated 4-paper plan); latency inconsistency (resolved 2026-09-11 by scoping <2ms claims to core-graph scale ≤~2k edges; the 3–8ms Property Graph tier row brackets the measured 0.6–6.6ms range); Commit table DDL bug in the source (declared `hash`, keyed on `id`) fixed in the DuckDB rewrite above; template name differs between the JSON-RPC response (`hash_password(pwd, :sha3)`) and Figure 3 (`hash_pwd(pwd)`); Paper 1 named Paper 2 topics as "InterrogationRouter strategies, knowledge graph distillation, long-horizon planning" — this paper covers intent negotiation but not knowledge-graph distillation or long-horizon planning.*
