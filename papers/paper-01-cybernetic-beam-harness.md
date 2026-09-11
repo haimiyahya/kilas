@@ -161,7 +161,7 @@ The Cybernetic BEAM Harness demonstrates that an insider, runtime-native control
 mix kilas.bench --lab poco --iterations 10000 --concurrency 16
 ```
 
-Artifacts: `github.com/kilas-project/beam-harness`
+Artifacts: `github.com/haimiyahya/kilas`
 
 ---
 

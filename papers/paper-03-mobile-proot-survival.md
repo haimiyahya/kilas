@@ -7,7 +7,7 @@
 |---|---|
 | **Author** | Mohd Norhaimi Bin Yahya |
 | **Affiliation** | Independent Researcher, Kilas Project |
-| **Contact** | mohd.norhaimi@kilas.dev • github.com/kilas-ai |
+| **Contact** | mohd.norhaimi@kilas.dev • github.com/haimiyahya/kilas |
 | **Version** | DRAFT v1.2 • Poco F5 Pro Edition • 12GB LPDDR5 (artifact header: "PAPER 3 DRAFT — POCO F5 PRO EDITION", badge "DRAFT v1.2") |
 | **Date** | Draft Date: May 2025 |
 | **arXiv** | "arXiv:2505.████ — cs.SE" (ID redacted/placeholder in source) |
@@ -395,7 +395,7 @@ mix local.rebar --force
 **Step 2 — Kilas + model download:**
 
 ```bash
-git clone https://github.com/kilas-ai/kilas.git ~/kilas
+git clone https://github.com/haimiyahya/kilas.git ~/kilas
 cd ~/kilas
 
 # Download quantized model — 25MB INT8
@@ -447,4 +447,4 @@ Appendix footer (verbatim): *"Kilas v1.2 — Volatile-First, AST-Native — Poco
 
 *Source footers: "PAPER 3 • KILAS v1.2 • POCO F5 PRO EDITION • DRAFT" · "98.7% flash saved • <10ms query • <5% battery/hr" · "Built for proot-distro Ubuntu • Elixir OTP 26 • Snapdragon 8+ Gen 1 • 12GB LPDDR5 • Volatile-First"*
 
-*Known gaps to revisit (flagged at extraction, not yet fixed): no SVG figures in this artifact (unlike Papers 1–2), but all code snippets/commands are unexecuted and unverified; arXiv ID is redacted in source ("arXiv:2505.████"); stack drift vs earlier papers — Paper 2 as delivered used KùzuDB + MemGit + in-memory HNSW + MiniLM (revised 2026-09-11 to DuckDB + libgraph) and never mentioned personal wiki nodes, yet §1 describes Paper 2 as "DuckDB property graph, vector sidecar, personal wiki nodes that survive reboots" and this paper builds on DuckDB + vec0 + Ortex/Rustler + bge-micro-v2; Paper 1 as delivered used ETS + MemGit, an 8GB tmpfs that worked on this same Poco F5 Pro (Platform B), TIA = "Target Test Impact Engine" with 0.42ms p50 test-impact resolution — yet §1 describes Paper 1 as "byte-range patching over a memory-mapped RAM disk" with "Transactional Intent Assessment (TIA) in 5–20ms" and the evaluation table's "Paper 1 x86" column lists "TIA 5–20ms"; tmpfs tension — §2 says proot mount "returns success but does not create a real tmpfs" AND "we observed mount failure 60% cold boots due to SELinux denial" (success vs failure), while Appendix verification shows `{:ok, "1G mounted"}`; Elixir version is 1.17 here vs 1.16 in Paper 1; Appendix URLs (github.com/kilas-ai/kilas, huggingface.co/kilas/bge-micro-v2-int8) unverified/likely placeholders, checksum truncated in source ("a3f9... expected"); references and all benchmarks (98.7% flash reduction, <5% battery/hr, 7.3ms/12ms/9.1ms verification numbers) unverified.*
+*Known gaps to revisit (flagged at extraction, not yet fixed): no SVG figures in this artifact (unlike Papers 1–2), but all code snippets/commands are unexecuted and unverified; arXiv ID is redacted in source ("arXiv:2505.████"); stack drift vs earlier papers — Paper 2 as delivered used KùzuDB + MemGit + in-memory HNSW + MiniLM (revised 2026-09-11 to DuckDB + libgraph) and never mentioned personal wiki nodes, yet §1 describes Paper 2 as "DuckDB property graph, vector sidecar, personal wiki nodes that survive reboots" and this paper builds on DuckDB + vec0 + Ortex/Rustler + bge-micro-v2; Paper 1 as delivered used ETS + MemGit, an 8GB tmpfs that worked on this same Poco F5 Pro (Platform B), TIA = "Target Test Impact Engine" with 0.42ms p50 test-impact resolution — yet §1 describes Paper 1 as "byte-range patching over a memory-mapped RAM disk" with "Transactional Intent Assessment (TIA) in 5–20ms" and the evaluation table's "Paper 1 x86" column lists "TIA 5–20ms"; tmpfs tension — §2 says proot mount "returns success but does not create a real tmpfs" AND "we observed mount failure 60% cold boots due to SELinux denial" (success vs failure), while Appendix verification shows `{:ok, "1G mounted"}`; Elixir version is 1.17 here vs 1.16 in Paper 1; Appendix URLs (github.com/kilas-ai/kilas) renamed 2026-09-11 to github.com/haimiyahya/kilas; huggingface.co/kilas/bge-micro-v2-int8 remains an unverified/likely placeholder, checksum truncated in source ("a3f9... expected"); references and all benchmarks (98.7% flash reduction, <5% battery/hr, 7.3ms/12ms/9.1ms verification numbers) unverified.*

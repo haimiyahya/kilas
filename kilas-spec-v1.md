@@ -1153,7 +1153,7 @@ defmodule Kilas.MixProject do
       {:sqlite_vec, "~> 0.1.0"},
 
       # Tree-sitter Elixir parser (Rust NIF)
-      {:tree_sitter_elixir, github: "kilas/tree-sitter-elixir-nif", branch: "aarch64"},
+      {:tree_sitter_elixir, github: "haimiyahya/tree-sitter-elixir-nif", branch: "aarch64"},
 
       # ONNX Runtime for local embeddings (bge-small)
       {:ortex, "~> 0.1.9"},
@@ -1167,7 +1167,7 @@ defmodule Kilas.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => "https://github.com/kilas/kilas"}
+      links: %{"GitHub" => "https://github.com/haimiyahya/kilas"}
     ]
   end
 end
