@@ -10,14 +10,14 @@
 | **Lab** | POCO F5 PRO 12GB LAB |
 | **Date** | December 2024 · Kuala Lumpur |
 | **Series position** | Source artifact header reads "Paper 2 / 3" and footer "Paper 2 of 3". This conflicts with Paper 1 ("Paper 1 of 4") and the stated 4-paper plan. Flagged at extraction — not corrected. |
-| **Keywords** | Conversational Codebases · KùzuDB · MemGit · Chesterton's Fence · BEAM · Agentic RAG |
-| **Source** | Extracted from a React artifact (pasted 2026-09-11) into Markdown. Figures were SVG diagrams in the source; they appear here as placeholders with their text content transcribed. Content transcribed as-is — no corrections applied yet. |
+| **Keywords** | Conversational Codebases · DuckDB · libgraph · MemGit · Chesterton's Fence · BEAM · Agentic RAG |
+| **Source** | Extracted from a React artifact (pasted 2026-09-11) into Markdown. Figures were SVG diagrams in the source; they appear here as placeholders with their text content transcribed. Content transcribed as-is — no corrections applied yet. Storage revised 2026-09-11: KùzuDB references updated to the DuckDB + libgraph architecture adopted in kilas-spec-v2. |
 
 ---
 
 ## Abstract
 
-Autonomous coding agents operating on large repositories fail not due to weak reasoning, but due to **structural inspection**. Current approaches force agents to reconstruct architecture from raw text via grep, vector search, and embedding retrieval—dumping 50k–120k tokens of fragmented files into context, triggering window inflation, architectural drift, and historical blindness. We introduce **Conversational Codebases**, a protocol shift from inspection to interrogation: the codebase becomes an active interlocutor backed by a multi-tier knowledge graph (Property Graph + Temporal Memory + Vector Index) that negotiates architectural intent, enforces style policies, and preserves institutional memory. Our implementation embeds KùzuDB for AST call graphs and spec relationships, MemGit lineage for commit provenance and stripped-comment recovery, and in-memory HNSW for intent mapping—all within the agent process with <2ms query latency. Evaluation on 120 architectural tasks shows a **96.2% token reduction** (85k → 3.2k) and **2.8× improvement** in first-turn completion (32% → 92%), while historical regression rate drops from 18.4% to <0.5% via Chesterton's Fence enforcement. The codebase no longer needs to be read; it can be asked.
+Autonomous coding agents operating on large repositories fail not due to weak reasoning, but due to **structural inspection**. Current approaches force agents to reconstruct architecture from raw text via grep, vector search, and embedding retrieval—dumping 50k–120k tokens of fragmented files into context, triggering window inflation, architectural drift, and historical blindness. We introduce **Conversational Codebases**, a protocol shift from inspection to interrogation: the codebase becomes an active interlocutor backed by a multi-tier knowledge graph (Property Graph + Temporal Memory + Vector Index) that negotiates architectural intent, enforces style policies, and preserves institutional memory. Our implementation pairs embedded DuckDB edge tables with an in-process libgraph projection for AST call graphs and spec relationships, MemGit lineage for commit provenance and stripped-comment recovery, and in-memory HNSW for intent mapping—all within the agent process with <2ms query latency. Evaluation on 120 architectural tasks shows a **96.2% token reduction** (85k → 3.2k) and **2.8× improvement** in first-turn completion (32% → 92%), while historical regression rate drops from 18.4% to <0.5% via Chesterton's Fence enforcement. The codebase no longer needs to be read; it can be asked.
 
 ---
 
@@ -46,49 +46,55 @@ A conversational codebase must answer three distinct questions simultaneously: *
 
 > **Figure 2 — Multi-Tier Knowledge Graph** *(SVG placeholder; "Embedded Intelligence · No External Dependencies")*
 >
-> - **G — PROPERTY GRAPH** (Embedded KùzuDB): AST Call Graphs · Spec Relationships · DB Schema Mappings — e.g. `TRAVERSE(CALLS) {depth:3}`
+> - **G — PROPERTY GRAPH** (DuckDB + libgraph): AST Call Graphs · Spec Relationships · DB Schema Mappings — e.g. `TRAVERSE(CALLS) {depth:3}`
 > - **T — TEMPORAL MEMORY** (MemGit Lineage): Commit Provenance · Historical Authors · Stripped Comments — e.g. `BLAME(node) → Commit`
 > - **V — VECTOR INDEX** (In-Memory HNSW): Natural Language Intent · Mapping · Symbol Summaries — e.g. `VECTOR_SEARCH("hash")`
 >
-> Footer: KùzuDB 0.6+ Embedded · libgit2 + MemGit · HNSW 128-dim
+> Footer: DuckDB Embedded + libgraph In-Memory · libgit2 + MemGit · HNSW 128-dim
 
 ### 2.1 Graph Schema Definition
 
-We model the repository as a property graph in embedded KùzuDB (zero-copy, process-local). The schema below captures requirements, AST symbols, commits, and their relations, allowing queries like "which spec does this function satisfy?" and "who last modified this symbol's ancestors?".
+We model the repository as typed edge tables in embedded DuckDB (durable, columnar) with a process-local libgraph projection for traversals. The schema below captures requirements, AST symbols, commits, and their relations, allowing queries like "which spec does this function satisfy?" and "who last modified this symbol's ancestors?".
 
-`schema.cypher · KùzuDB DDL`:
+`schema.sql · DuckDB DDL`:
 
 ```sql
-CREATE NODE TABLE SpecRequirement (id STRING, text STRING, PRIMARY KEY (id));
-CREATE NODE TABLE ASTNode (
-  id STRING, 
-  filepath STRING, 
-  symbol_name STRING, 
-  node_type STRING, 
-  PRIMARY KEY (id)
+CREATE TABLE spec_requirements (id VARCHAR PRIMARY KEY, text VARCHAR);
+CREATE TABLE ast_nodes (
+  id VARCHAR PRIMARY KEY,
+  filepath VARCHAR,
+  symbol_name VARCHAR,
+  node_type VARCHAR
 );
-CREATE NODE TABLE Commit (
-  hash STRING, 
-  author STRING, 
-  message STRING, 
-  timestamp INT64, 
-  PRIMARY KEY (id)
+CREATE TABLE commits (
+  hash VARCHAR PRIMARY KEY,
+  author VARCHAR,
+  message VARCHAR,
+  timestamp BIGINT
 );
 
-CREATE REL TABLE SATISFIED_BY (FROM SpecRequirement TO ASTNode);
-CREATE REL TABLE CALLS (FROM ASTNode TO ASTNode);
-CREATE REL TABLE MODIFIED_IN (FROM ASTNode TO Commit);
+-- Typed edge list: all relationships share one durable table
+CREATE TABLE graph_edges (
+  label VARCHAR,   -- 'SATISFIED_BY' | 'CALLS' | 'MODIFIED_IN'
+  src VARCHAR,
+  dst VARCHAR,
+  count INTEGER
+);
+```
 
-// Example traversal: blast radius for signature change
-MATCH (a:ASTNode {symbol_name: 'hash_password'})-[:CALLS*1..3]->(b:ASTNode)
-RETURN b.filepath, b.symbol_name, COUNT(*) AS impact;
+At repo load, the GraphServer GenServer projects the edge list into an in-process libgraph graph; traversals then run entirely in BEAM memory:
+
+```elixir
+# Example traversal: blast radius for signature change
+graph = GraphServer.projected()   # libgraph %Graph{} built from graph_edges
+impact = reverse_bfs(graph, "hash_password", depth: 3)  # walks Graph.in_neighbors/2
 ```
 
 Tier summary (as given in the paper):
 
 | Tier | Latency | Description |
 |---|---|---|
-| **Property Graph** | 3–8ms | Built at repo load via tree-sitter. Stores call edges, spec → implementation links, and DB schema foreign keys. Fully in-process, no server. |
+| **Property Graph** | 3–8ms | Built at repo load via tree-sitter. Durable edge tables in DuckDB, projected into an in-process libgraph graph for traversal. Fully in-process, no server. |
 | **Temporal Memory** | 1–2ms | MemGit indexes every commit touching an AST node. Recovers deleted comments by diffing parent commits. Author attribution enables institutional Q&A. |
 | **Vector Index** | <1ms | 128-dim MiniLM embeddings of symbol summaries (not raw code). Maps "add SHA3" → `hash_password/1` without brittle grep. |
 
@@ -154,7 +160,7 @@ Most regressions occur because agents violate Chesterton's Fence—removing cons
 > QUERY: "Why is txn_status hardcoded to 1 in insert_tx()?"
 >
 > HISTORICAL REASONER ENGINE — 3-stage lineage recovery:
-> 1. **AST NODE LOOKUP** — `src/db/txn.ex::insert_tx` — KùzuDB: `MATCH (n:ASTNode) WHERE id = ...`
+> 1. **AST NODE LOOKUP** — `src/db/txn.ex::insert_tx` — DuckDB: `SELECT * FROM ast_nodes WHERE id = ...`
 > 2. **GIT BLAME QUERY** — Commit 2612f859 · Author: Intern — MODIFIED_IN edge traversal
 > 3. **DIFF ANCESTRY** — Parent: 8a4f0012 (Joe) — Deleted: `// Txn status on insert = 1 (pending)`
 >
@@ -183,7 +189,7 @@ We evaluated on 120 architectural tasks across Elixir, Python, and TypeScript re
 | First-Turn Completion | 32% | **92%** · 2.8× ↑ |
 | Historical Regression Rate | 18.4% | **<0.5%** · Chesterton guard |
 
-Notes: All measurements on-device, Poco F5 Pro (Snapdragon 8+ Gen 1, 12GB). No network calls during task execution. KùzuDB embedded, HNSW in-memory, libgit2 via Rust NIF.
+Notes: All measurements on-device, Poco F5 Pro (Snapdragon 8+ Gen 1, 12GB). No network calls during task execution. DuckDB embedded, libgraph in-memory, HNSW in-memory, libgit2 via Rust NIF.
 
 **System Impact Summary:** The conversational protocol collapses retrieval from "find files" to "decide architecture." By moving policy enforcement and historical reasoning into the codebase itself, we eliminate prompt stuffing and enable agents to generate correct code on the first turn without exploratory grep loops. The 96.2% token reduction is not compression—it is the removal of irrelevant data that should never have entered the context.
 
@@ -193,21 +199,22 @@ Notes: All measurements on-device, Poco F5 Pro (Snapdragon 8+ Gen 1, 12GB). No n
 
 Codebases have always contained more knowledge than their text: call graphs, style policies, commit histories, and stripped rationales. Traditional agents ignore this latent structure and pay with tokens, accuracy, and regressions. Conversational Codebases make that structure queryable.
 
-Our three-tier graph—Property Graph (KùzuDB), Temporal Memory (MemGit), Vector Intent (HNSW)—transforms the repository from a file store into a negotiating peer. It does not dump files; it answers "how should this be built?" with blast-radius analysis, policy-compliant templates, and historical justification. On a constrained 12GB device, this yields <2ms queries, 96.2% token savings, and near-zero historical regressions.
+Our three-tier graph—Property Graph (DuckDB + libgraph), Temporal Memory (MemGit), Vector Intent (HNSW)—transforms the repository from a file store into a negotiating peer. It does not dump files; it answers "how should this be built?" with blast-radius analysis, policy-compliant templates, and historical justification. On a constrained 12GB device, this yields <2ms queries, 96.2% token savings, and near-zero historical regressions.
 
-**Future Work:** Paper 3 will explore collaborative interrogation where multiple agents negotiate over the same codebase graph, requiring conflict resolution and distributed style policy consensus via CRDTs. We will also open-source the BEAM router and KùzuDB Elixir bindings.
+**Future Work:** Paper 3 will explore collaborative interrogation where multiple agents negotiate over the same codebase graph, requiring conflict resolution and distributed style policy consensus via CRDTs. We will also open-source the BEAM router and the DuckDB–libgraph projection layer.
 
 ---
 
 ## References
 
-1. KùzuDB — Embedded Graph Database, 0.6.0. kuzu.io
-2. Chesterton, G.K. — *The Thing: Why I Am Catholic* (1929). Fence Principle.
-3. Yang et al. — SWE-Agent: Agent-Computer Interfaces (2024).
-4. MemGit — Commit Provenance as Graph (Kilas Project, 2024).
+1. DuckDB — In-Process SQL OLAP Database. duckdb.org (Elixir NIF: duckdbex)
+2. libgraph — In-Memory Property Graph Data Structure for Elixir. hex.pm/packages/libgraph
+3. Chesterton, G.K. — *The Thing: Why I Am Catholic* (1929). Fence Principle.
+4. Yang et al. — SWE-Agent: Agent-Computer Interfaces (2024).
+5. MemGit — Commit Provenance as Graph (Kilas Project, 2024).
 
 ---
 
 *Source footer: "Kilas Project · Conversational Codebases · Paper 2 of 3 · © 2024 Mohd Norhaimi Bin Yahya" · "Built on Poco F5 Pro 12GB Lab · No external dependencies"*
 
-*Known gaps to revisit (flagged at extraction, not yet fixed): figure diagrams (placeholders only); verification of references/benchmarks; series-position conflict ("Paper 2 of 3" here vs "Paper 1 of 4" in Paper 1 and the stated 4-paper plan); latency inconsistency (abstract/§2/§4 say <2ms but the Property Graph tier is listed at 3–8ms); Commit table DDL uses `PRIMARY KEY (id)` but declares a `hash` column (no `id`); template name differs between the JSON-RPC response (`hash_password(pwd, :sha3)`) and Figure 3 (`hash_pwd(pwd)`); Paper 1 named Paper 2 topics as "InterrogationRouter strategies, knowledge graph distillation, long-horizon planning" — this paper covers intent negotiation but not knowledge-graph distillation or long-horizon planning.*
+*Known gaps to revisit (flagged at extraction, not yet fixed): figure diagrams (placeholders only); verification of references/benchmarks; series-position conflict ("Paper 2 of 3" here vs "Paper 1 of 4" in Paper 1 and the stated 4-paper plan); latency inconsistency (abstract/§2/§4 say <2ms but the Property Graph tier is listed at 3–8ms); Commit table DDL bug in the source (declared `hash`, keyed on `id`) fixed in the DuckDB rewrite above; template name differs between the JSON-RPC response (`hash_password(pwd, :sha3)`) and Figure 3 (`hash_pwd(pwd)`); Paper 1 named Paper 2 topics as "InterrogationRouter strategies, knowledge graph distillation, long-horizon planning" — this paper covers intent negotiation but not knowledge-graph distillation or long-horizon planning.*
