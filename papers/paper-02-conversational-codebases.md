@@ -17,7 +17,7 @@
 
 ## Abstract
 
-Autonomous coding agents operating on large repositories fail not due to weak reasoning, but due to **structural inspection**. Current approaches force agents to reconstruct architecture from raw text via grep, vector search, and embedding retrieval—dumping 50k–120k tokens of fragmented files into context, triggering window inflation, architectural drift, and historical blindness. We introduce **Conversational Codebases**, a protocol shift from inspection to interrogation: the codebase becomes an active interlocutor backed by a multi-tier knowledge graph (Property Graph + Temporal Memory + Vector Index) that negotiates architectural intent, enforces style policies, and preserves institutional memory. Our implementation pairs embedded DuckDB edge tables with an in-process libgraph projection for AST call graphs and spec relationships, MemGit lineage for commit provenance and stripped-comment recovery, and in-memory HNSW for intent mapping—all within the agent process with <2ms query latency at core-graph scale (≤~2k edges); worst-case full-repo traversal measured at ~6.6ms on a ~360k-LOC polyglot codebase (~10k edges). Evaluation on 120 architectural tasks shows a **96.2% token reduction** (85k → 3.2k) and **2.8× improvement** in first-turn completion (32% → 92%), while historical regression rate drops from 18.4% to <0.5% via Chesterton's Fence enforcement. The codebase no longer needs to be read; it can be asked.
+Autonomous coding agents operating on large repositories fail not due to weak reasoning, but due to **structural inspection**. Current approaches force agents to reconstruct architecture from raw text via grep, vector search, and embedding retrieval—dumping 50k–120k tokens of fragmented files into context, triggering window inflation, architectural drift, and historical blindness. We introduce **Conversational Codebases**, a protocol shift from inspection to interrogation: the codebase becomes an active interlocutor backed by a multi-tier knowledge graph (Property Graph + Temporal Memory + Vector Index) that negotiates architectural intent, enforces style policies, and preserves institutional memory. Our implementation pairs embedded DuckDB edge tables with an in-process libgraph projection for AST call graphs and spec relationships, MemGit lineage for commit provenance and stripped-comment recovery, and a validated plug-and-play vector store (DuckDB vss HNSW primary / sqlite-vec fallback) for intent mapping—all within the agent process with <2ms query latency at core-graph scale (≤~2k edges); worst-case full-repo traversal measured at ~6.6ms on a ~360k-LOC polyglot codebase (~10k edges). Evaluation on 120 architectural tasks shows a **96.2% token reduction** (85k → 3.2k) and **2.8× improvement** in first-turn completion (32% → 92%), while historical regression rate drops from 18.4% to <0.5% via Chesterton's Fence enforcement. The codebase no longer needs to be read; it can be asked.
 
 ---
 
@@ -48,9 +48,9 @@ A conversational codebase must answer three distinct questions simultaneously: *
 >
 > - **G — PROPERTY GRAPH** (DuckDB + libgraph): AST Call Graphs · Spec Relationships · DB Schema Mappings — e.g. `TRAVERSE(CALLS) {depth:3}`
 > - **T — TEMPORAL MEMORY** (MemGit Lineage): Commit Provenance · Historical Authors · Stripped Comments — e.g. `BLAME(node) → Commit`
-> - **V — VECTOR INDEX** (In-Memory HNSW): Natural Language Intent · Mapping · Symbol Summaries — e.g. `VECTOR_SEARCH("hash")`
+> - **V — VECTOR INDEX** (plug-and-play store: DuckDB vss HNSW primary / sqlite-vec fallback): Natural Language Intent · Mapping · Symbol Summaries — e.g. `VECTOR_SEARCH("hash")`
 >
-> Footer: DuckDB Embedded + libgraph In-Memory · libgit2 + MemGit · HNSW 128-dim
+> Footer: DuckDB Embedded + libgraph In-Memory · MemGit in BEAM (ETS) · bge-micro-v2 384-dim
 
 ### 2.1 Graph Schema Definition
 
@@ -96,7 +96,7 @@ Tier summary (as given in the paper):
 |---|---|---|
 | **Property Graph** | 3–8ms | Built at repo load via tree-sitter. Durable edge tables in DuckDB, projected into an in-process libgraph graph for traversal. Fully in-process, no server. |
 | **Temporal Memory** | 1–2ms | MemGit indexes every commit touching an AST node. Recovers deleted comments by diffing parent commits. Author attribution enables institutional Q&A. |
-| **Vector Index** | <1ms | 128-dim MiniLM embeddings of symbol summaries (not raw code). Maps "add SHA3" → `hash_password/1` without brittle grep. |
+| **Vector Index** | <10ms | 384-dim bge-micro-v2 embeddings of symbol summaries (not raw code), validated plug-and-play store (DuckDB vss HNSW @10k: 3ms; sqlite-vec fallback: ~9.7ms). Maps "add SHA3" → `hash_password/1` without brittle grep. |
 
 ---
 
@@ -189,7 +189,7 @@ We evaluated on 120 architectural tasks across Elixir, Python, and TypeScript re
 | First-Turn Completion | 32% | **92%** · 2.8× ↑ |
 | Historical Regression Rate | 18.4% | **<0.5%** · Chesterton guard |
 
-Notes: All measurements on-device, Poco F5 Pro (Snapdragon 8+ Gen 1, 12GB). No network calls during task execution. DuckDB embedded, libgraph in-memory, HNSW in-memory, libgit2 via Rust NIF. Latency scoping per AST-measured benchmark (2026-09-11): BFS <2ms at ≤~2k edges, ~6.6ms p50 at ~10k edges (361k-LOC polyglot Go codebase).
+Notes: All measurements on-device, Poco F5 Pro (Snapdragon 8+ Gen 1, 12GB). No network calls during task execution. DuckDB embedded, libgraph in-memory, plug-and-play vector store (DuckDB vss HNSW / sqlite-vec), MemGit in BEAM (ETS). Latency scoping per AST-measured benchmark (2026-09-11): BFS <2ms at ≤~2k edges, ~6.6ms p50 at ~10k edges (361k-LOC polyglot Go codebase).
 
 **System Impact Summary:** The conversational protocol collapses retrieval from "find files" to "decide architecture." By moving policy enforcement and historical reasoning into the codebase itself, we eliminate prompt stuffing and enable agents to generate correct code on the first turn without exploratory grep loops. The 96.2% token reduction is not compression—it is the removal of irrelevant data that should never have entered the context.
 
@@ -199,7 +199,7 @@ Notes: All measurements on-device, Poco F5 Pro (Snapdragon 8+ Gen 1, 12GB). No n
 
 Codebases have always contained more knowledge than their text: call graphs, style policies, commit histories, and stripped rationales. Traditional agents ignore this latent structure and pay with tokens, accuracy, and regressions. Conversational Codebases make that structure queryable.
 
-Our three-tier graph—Property Graph (DuckDB + libgraph), Temporal Memory (MemGit), Vector Intent (HNSW)—transforms the repository from a file store into a negotiating peer. It does not dump files; it answers "how should this be built?" with blast-radius analysis, policy-compliant templates, and historical justification. On a constrained 12GB device, this yields <2ms queries at core-graph scale (~6.6ms worst-case full-repo), 96.2% token savings, and near-zero historical regressions.
+Our three-tier graph—Property Graph (DuckDB + libgraph), Temporal Memory (MemGit), Vector Intent (validated plug-and-play store)—transforms the repository from a file store into a negotiating peer. It does not dump files; it answers "how should this be built?" with blast-radius analysis, policy-compliant templates, and historical justification. On a constrained 12GB device, this yields <2ms queries at core-graph scale (~6.6ms worst-case full-repo), 96.2% token savings, and near-zero historical regressions.
 
 **Future Work:** Paper 3 will explore collaborative interrogation where multiple agents negotiate over the same codebase graph, requiring conflict resolution and distributed style policy consensus via CRDTs. We will also open-source the BEAM router and the DuckDB–libgraph projection layer.
 
@@ -217,4 +217,4 @@ Our three-tier graph—Property Graph (DuckDB + libgraph), Temporal Memory (MemG
 
 *Source footer: "Kilas Project · Conversational Codebases · Paper 2 of 3 · © 2024 Mohd Norhaimi Bin Yahya" · "Built on Poco F5 Pro 12GB Lab · No external dependencies"*
 
-*Known gaps to revisit (flagged at extraction, not yet fixed): figure diagrams (placeholders only); verification of references/benchmarks; series-position conflict ("Paper 2 of 3" here vs "Paper 1 of 4" in Paper 1 and the stated 4-paper plan); latency inconsistency (resolved 2026-09-11 by scoping <2ms claims to core-graph scale ≤~2k edges; the 3–8ms Property Graph tier row brackets the measured 0.6–6.6ms range); Commit table DDL bug in the source (declared `hash`, keyed on `id`) fixed in the DuckDB rewrite above; template name differs between the JSON-RPC response (`hash_password(pwd, :sha3)`) and Figure 3 (`hash_pwd(pwd)`); Paper 1 named Paper 2 topics as "InterrogationRouter strategies, knowledge graph distillation, long-horizon planning" — this paper covers intent negotiation but not knowledge-graph distillation or long-horizon planning.*
+*Known gaps to revisit (flagged at extraction, not yet fixed): figure diagrams (placeholders only); verification of references/benchmarks; series-position conflict ("Paper 2 of 3" here vs "Paper 1 of 4" in Paper 1 and the stated 4-paper plan); latency inconsistency (resolved 2026-09-11 by scoping <2ms claims to core-graph scale ≤~2k edges; the 3–8ms Property Graph tier row brackets the measured 0.6–6.6ms range); Commit table DDL bug in the source (declared `hash`, keyed on `id`) fixed in the DuckDB rewrite above; template name differs between the JSON-RPC response (`hash_password(pwd, :sha3)`) and Figure 3 (`hash_pwd(pwd)`); Paper 1 named Paper 2 topics as "InterrogationRouter strategies, knowledge graph distillation, long-horizon planning" — this paper covers intent negotiation but not knowledge-graph distillation or long-horizon planning. Vector tier reconciled 2026-09-12 to the validated stack (`.tools/validate/RESULTS.md` rows 10-12): "In-Memory HNSW / 128-dim MiniLM" rewritten to bge-micro-v2 384-dim + plug-and-play store (DuckDB vss HNSW primary, sqlite-vec fallback); "libgit2 via Rust NIF" rewritten to MemGit in BEAM (ETS). Note: the Future-Work CRDT collaboration promise here is not delivered by Paper 3 (which covers survival engineering) — the collaborative-interrogation topic remains open.*

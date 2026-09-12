@@ -174,4 +174,4 @@ Artifacts: `github.com/haimiyahya/kilas`
 
 ---
 
-*Known gaps to revisit (flagged at extraction, not yet fixed): figure diagrams, and verification of references/benchmarks against real sources. tmpfs references were rewritten 2026-09-12 after validation proved PRoot on this device has no writable tmpfs (see `.tools/validate/RESULTS.md` row 1) — hot state lives in BEAM RAM; workspace files on f2fs.*
+*Known gaps to revisit (flagged at extraction, not yet fixed): figure diagrams, and verification of references/benchmarks against real sources. tmpfs references were rewritten 2026-09-12 after validation proved PRoot on this device has no writable tmpfs (see `.tools/validate/RESULTS.md` row 1) — hot state lives in BEAM RAM; workspace files on f2fs. The §4 Table 1 latencies (0.42ms end-to-end etc.) are historical MemGit-era claims from the draft — unverified on this device; the operative spec (kilas-spec-v2.md §08) targets <25ms end-to-end per interaction, with 3.6ms/fork measured for exec-per-command (2026-09-12).*

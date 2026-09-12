@@ -1,5 +1,7 @@
 # KILAS — Architecture & Implementation Specification
 
+> ⚠️ **SUPERSEDED by kilas-spec-v2.md (2026-09-12).** Historical reference only — do not build from this document. Known divergences vs the operative v2 spec and the validated stack (.tools/validate/RESULTS.md): graph = DuckDB + DuckPGQ here (rejected by validation — v2 uses DuckDB `graph_edges` + libgraph); vectors = sqlite-vec only (v2: validated plug-and-play store, DuckDB vss HNSW primary / sqlite-vec fallback); driver = `{:duckdb, "~> 0.1.0"}` (v2: duckdbex); quota = 512MB (v2: 1GB on 12GB devices); env var `KILAS_PHYSICAL_ROOT` (v2: `KILAS_PHYSICAL`). The JSON-RPC Architect contracts and the wiki/task-graph model below survive in v2's Architect + Wiki layers (§05, §04 7b).
+
 **Version:** v1.1.0-complete • **Badge:** Mobile-Native Workspace Engine
 
 - **BEAM VM / Elixir**

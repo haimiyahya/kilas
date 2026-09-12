@@ -21,7 +21,7 @@
 Papers 1 and 2 introduced the *Cybernetic BEAM Harness* and *Conversational Codebase Protocol*. While performant on x86 workstations, both assume a RAM-disk workspace, functional `inotify`, stable power, and abundant RAM — assumptions that collapse on mobile Android PRoot where the OS kills processes at will, eMMC write amplification is prohibitive, NIFs crash the BEAM scheduler, and (validated 2026-09-12) PRoot offers no tmpfs at all: `mount` is an emulated no-op and the host exposes no `/dev/shm` to bind. This paper introduces **Kilas v1.2**, a mobile-native synthesis hardened for survival: hot state lives in BEAM RAM (ETS/MemGit), the workspace is a plain f2fs directory served by the kernel page cache, and the physical repo is touched only by ShadowSync.
 
 - **C1** — Volatile-First Execution with atomic ShadowSync recovery eliminating 100% NAND writes during edit loops
-- **C2** — Local-First Vector Pipeline — quantized ONNX bge-micro-v2 25MB INT8 on BEAM dirty_cpu NIFs, 8–12ms
+- **C2** — Local-First Vector Pipeline — quantized ONNX bge-micro-v2 25MB INT8 on BEAM dirty_cpu NIFs, 8–12ms for ≤64-token chunks (validated 2026-09-12: 15–35ms for 100–300-token chunks)
 - **C3** — Function-Level AST Granularity + Recursive Split-and-Merge with Parent Context Envelopes
 - **C4** — Personal Wiki & Task Graph as first-class property graph nodes + Mobile Failure hardening
 
@@ -58,9 +58,9 @@ Evaluated on **Poco F5 Pro 12GB RAM** proot-distro Ubuntu with Elixir OTP 26 lat
 
 ## §1 Introduction: From Lab to Pocket
 
-**Paper 1** made edits fast: byte-range patching over a memory-mapped RAM disk, Transactional Intent Assessment (TIA) in 5–20ms, BEAM harness supervising tree-sitter and git. **Paper 2** made the codebase remember: DuckDB property graph, vector sidecar, personal wiki nodes that survive reboots.
+**Paper 1** made edits fast: byte-range patching over a memory-mapped RAM disk, Target Test Impact Engine (TIA) in 5–20ms, BEAM harness supervising tree-sitter and git. **Paper 2** made the codebase remember: DuckDB property graph, vector sidecar, personal wiki nodes that survive reboots.
 
-Both assumed a workstation. On **Poco F5 Pro** proot-distro, those assumptions invert: `mount -t tmpfs` is impossible rootless — inside PRoot the syscall is an emulated no-op (returns success, creates nothing) and the host exposes no bindable tmpfs (validated 2026-09-12 on this device: no `/dev/shm` at the host level; launch-time binds reach only plain directories, which stay f2fs), `inotify` is silently broken inside PRoot translation, Android LMK kills background BEAM nodes at 85% memory pressure, and UFS 3.1 NAND write amplification turns 800 writes/hour into ~30GB/day wear — catastrophic for a device you carry.
+Both assumed a workstation. On **Poco F5 Pro** proot-distro, those assumptions invert: `mount -t tmpfs` is impossible rootless — inside PRoot the syscall is an emulated no-op (returns success, creates nothing) and the host exposes no bindable tmpfs (validated 2026-09-12 on this device: no `/dev/shm` at the host level; launch-time binds reach only plain directories, which stay f2fs), `inotify` was assumed broken inside PRoot (disproven 2026-09-12: `inotify-tools` + the `file_system` hex package verified working — `:fs_poll` stays as a fallback only), Android LMK kills background BEAM nodes at 85% memory pressure, and UFS 3.1 NAND write amplification turns 800 writes/hour into ~30GB/day wear — catastrophic for a device you carry.
 
 **Kilas v1.2** is the synthesis: Paper 1 fast, Paper 2 remembers, but designed for survival first. By targeting the hardest substrate — Android PRoot on Snapdragon 8+ Gen 1 — we get a volatile-first engine that also saves QLC NVMe on x86 desktops. This paper details the hardening on the 12GB RAM variant of Poco F5 Pro, where we can safely allocate a 1GB workspace quota (vs 512MB on 8GB devices) and a 512MB DuckDB memory limit.
 
@@ -157,7 +157,7 @@ defmodule Kilas.Embedder.Ortex do
     :persistent_term.put(:kilas_model, Ortex.load(path))
   end
 
-  @doc "8-12ms on Snapdragon 8+ Gen 1 (Poco F5 Pro 12GB)"
+  @doc "8-12ms for <=64-token chunks; 15-35ms for 100-300-token chunks (validated 2026-09-12, Snapdragon 8+ Gen 1 / Poco F5 Pro 12GB)"
   def embed(text) when is_binary(text) do
     model = :persistent_term.get(:kilas_model)
     Ortex.run(model, text, max_tokens: 512)
@@ -201,7 +201,7 @@ Embed latency cards (as given in the paper):
 
 | Platform | Latency | Note |
 |---|---|---|
-| Snapdragon 8+ Gen 1 • 12GB | **8–12ms** | per embed local |
+| Snapdragon 8+ Gen 1 • 12GB | **8–12ms** | per embed local; 15–35ms at 100–300 tokens (validated) |
 | 8GB variant (F5 Pro 8GB) | ~15ms | thermal throttled |
 | x86 AVX2 desktop | 4–6ms | baseline |
 
@@ -312,7 +312,7 @@ end
 
 | Failure Mode | Traditional Agent | Kilas Mitigation |
 |---|---|---|
-| **inotify broken** (PRoot Android 13+) | watcher stops silently | `FileSystem :fs_poll` fallback 500ms poll + 500ms debounce |
+| **inotify assumed broken** (PRoot Android 13+) | — | DISPROVEN 2026-09-12: `inotify-tools` + `file_system` hex verified working in PRoot; `:fs_poll` kept as fallback only (500ms poll + 500ms debounce) |
 | **NIF blocks BEAM** (scheduler collapse) | 5s freeze → watchdog kill | `dirty_cpu` + `persistent_term` model cache |
 | **Tree-sitter missing** (no Elixir binding) | no AST, fallback regex | `ex_tree_sitter` via Rustler + `tree_sitter_elixir` |
 | **Thermal / Battery** (<15% or >75°C) | continues burning CPU | Housekeeper checks `/sys/class/thermal/...` + `/battery/capacity`, pauses janitor & vector reindex |
@@ -445,8 +445,8 @@ Kilas.Health.check()
 #   duckdb: {:ok, "512MB"},
 #   embedder: {:ok, "bge-micro-v2-int8 25MB loaded dirty_cpu"},
 #   thermal: {:ok, "42C"},
-#   battery: {:ok, "78%"},
-#   fs_watcher: {:poll, "500ms fs_poll active — inotify unavailable in PRoot"}
+#   battery: {:unavailable, "battery sysfs not exposed in PRoot (validated 2026-09-12) — KIV Termux:API"},
+#   fs_watcher: {:inotify, "file_system backend active (inotify-tools; validated 2026-09-12)"}
 # }
 ```
 
@@ -456,4 +456,4 @@ Appendix footer (verbatim): *"Kilas v1.2 — Volatile-First, AST-Native — Poco
 
 *Source footers: "PAPER 3 • KILAS v1.2 • POCO F5 PRO EDITION • DRAFT" · "98.7% flash saved • <10ms query • <5% battery/hr" · "Built for proot-distro Ubuntu • Elixir OTP 26 • Snapdragon 8+ Gen 1 • 12GB LPDDR5 • Volatile-First"*
 
-*Known gaps to revisit (flagged at extraction, not yet fixed): no SVG figures in this artifact (unlike Papers 1–2), but all code snippets/commands are unexecuted and unverified; arXiv ID is redacted in source ("arXiv:2505.████"); stack drift vs earlier papers — Paper 2 as delivered used KùzuDB + MemGit + in-memory HNSW + MiniLM (revised 2026-09-11 to DuckDB + libgraph) and never mentioned personal wiki nodes, yet §1 describes Paper 2 as "DuckDB property graph, vector sidecar, personal wiki nodes that survive reboots" and this paper builds on DuckDB + vec0 + Ortex/Rustler + bge-micro-v2; Paper 1 as delivered used ETS + MemGit, a claimed 8GB tmpfs workspace, TIA = "Target Test Impact Engine" with 0.42ms p50 test-impact resolution — yet §1 describes Paper 1 as "byte-range patching over a memory-mapped RAM disk" with "Transactional Intent Assessment (TIA) in 5–20ms" and the evaluation table's "Paper 1 x86" column lists "TIA 5–20ms"; tmpfs tension — RESOLVED 2026-09-12: validation proved PRoot on this device has no tmpfs at all (mount is an emulated no-op, host exposes no `/dev/shm` to bind — see RESULTS.md row 1), making §2's success-vs-failure contradiction moot; the §2 "60% mount failure" and Appendix `{:ok, "1G mounted"}` claims were both wrong and have been rewritten to the definitive finding plus the f2fs-workspace + BEAM-RAM design; Elixir version is 1.17 here vs 1.16 in Paper 1; Appendix URLs (github.com/kilas-ai/kilas) renamed 2026-09-11 to github.com/haimiyahya/kilas; huggingface.co/kilas/bge-micro-v2-int8 remains an unverified/likely placeholder, checksum truncated in source ("a3f9... expected"); references and all benchmarks (98.7% flash reduction, <5% battery/hr, 7.3ms/12ms/9.1ms verification numbers) unverified.*
+*Known gaps to revisit (flagged at extraction, not yet fixed): no SVG figures in this artifact (unlike Papers 1–2), but all code snippets/commands are unexecuted and unverified; arXiv ID is redacted in source ("arXiv:2505.████"); stack drift vs earlier papers — Paper 2 as delivered used KùzuDB + MemGit + in-memory HNSW + MiniLM (revised 2026-09-11 to DuckDB + libgraph) and never mentioned personal wiki nodes, yet §1 describes Paper 2 as "DuckDB property graph, vector sidecar, personal wiki nodes that survive reboots" and this paper builds on DuckDB + vec0 + Ortex/Rustler + bge-micro-v2; Paper 1 as delivered used ETS + MemGit, a claimed 8GB tmpfs workspace, TIA = "Target Test Impact Engine" with 0.42ms p50 test-impact resolution — yet §1 describes Paper 1 as "byte-range patching over a memory-mapped RAM disk" with "Transactional Intent Assessment (TIA) in 5–20ms" and the evaluation table's "Paper 1 x86" column lists "TIA 5–20ms"; tmpfs tension — RESOLVED 2026-09-12: validation proved PRoot on this device has no tmpfs at all (mount is an emulated no-op, host exposes no `/dev/shm` to bind — see RESULTS.md row 1), making §2's success-vs-failure contradiction moot; the §2 "60% mount failure" and Appendix `{:ok, "1G mounted"}` claims were both wrong and have been rewritten to the definitive finding plus the f2fs-workspace + BEAM-RAM design; Elixir version is 1.17 here vs 1.16 in Paper 1; Appendix URLs (github.com/kilas-ai/kilas) renamed 2026-09-11 to github.com/haimiyahya/kilas; huggingface.co/kilas/bge-micro-v2-int8 remains an unverified/likely placeholder, checksum truncated in source ("a3f9... expected"); references and all benchmarks (98.7% flash reduction, <5% battery/hr, 7.3ms/12ms/9.1ms verification numbers) unverified. Reconciled 2026-09-12: inotify — the "silently broken" claim was DISPROVEN by validation (inotify-tools + `file_system` hex work in PRoot; `:fs_poll` demoted to fallback) and §1/§6/Appendix rewritten; embed latency — scoped: 8–12ms holds for ≤64-token chunks, 100–300-token chunks measured 15–35ms (RESULTS.md row 12); TIA — §1's "Transactional Intent Assessment" renamed to the canonical **Target Test Impact Engine**; thermal — §6's 75°C is skin-temperature guidance for the janitor pause in this paper, while the operative spec (kilas-spec-v2.md) pauses at 42°C on the CPU thermal-zone sensor (the validated protocol, throttling observed there); different sensors, both noted. Battery — Appendix Health.check now returns `:unavailable` (battery sysfs not exposed through PRoot, RESULTS 5b; KIV Termux:API).*
