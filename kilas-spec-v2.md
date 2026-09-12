@@ -14,11 +14,11 @@ ABSTRACT — EXECUTABLE SPEC
 
 This spec merges Papers 1-4 into a single buildable document. Contains exact file tree, ETS/DuckDB/libgraph schemas, pseudocode, APIs, config templates, performance targets, and implementation order. Paste entire spec into Claude Code with prompt `“Build Kilas v2.0 exactly per this spec, file by file, no shortcuts”`. No bash sh -c loops. All heavy compilers via persistent Ports, fast path 100% BEAM-native.
 
-Invariants: Volatile-First (work in tmpfs), Zero-Fork (≤1 fork/min), Single-Writer (CodeWriter singleton), Language-Agnostic (Tree-sitter + GenericAdapter).
+Invariants: Volatile-First (hot state in BEAM RAM — ETS/MemGit; workspace files on f2fs; physical disk touched only by ShadowSync), Zero-Fork (≤1 fork/min), Single-Writer (CodeWriter singleton), Language-Agnostic (Tree-sitter + GenericAdapter).
 
 14 INTERACTIONS • 6 LAYERS
 
-tmpfs 1GB • ShadowSync 60s • WAL + atomic rsync
+workspace 1GB (f2fs) • ShadowSync 60s • WAL + atomic rsync
 
 TABLE OF CONTENTS
 
@@ -50,11 +50,11 @@ FINAL: Claude Code Prompt + Diagrams
 
 Volatile-First
 
-All work in /tmp/kilas tmpfs 1GB. Physical disk is only touched by Housekeeper ShadowSync every 60s via atomic rsync + WAL. Zero small writes, zero fsync during loop. On PRoot without root, fallback to /data/data/com.termux/files/usr/tmp/kilas with 1GB quota file.
+Hot state lives in BEAM RAM: ETS (MemGit, locks, bindings) with validated 0.42µs reads. Workspace files live in /tmp/kilas — a plain f2fs directory with 1GB quota (kernel page cache serves hot files; validated ~1.2ms small-file reads, 2.7GB/s bulk). No tmpfs exists in PRoot (validated: no /dev/shm on host, mounts impossible rootless) — no mount is attempted. Physical repo disk is only touched by Housekeeper ShadowSync every 60s via atomic rsync + WAL.
 
-- › mount -t tmpfs -o size=1G tmpfs /tmp/kilas
+- › WorkspaceManager.ensure_workspace(): mkdir /tmp/kilas + 1GB quota check (no mount)
 
-- › recover_from_disk() on boot: rsync physical → tmpfs
+- › recover_from_disk() on boot: rsync physical → workspace
 
 - › All File.read!/write! point to /tmp/kilas/*
 
@@ -99,8 +99,8 @@ Tree-sitter for all languages. GenericShellAdapter reads .kilas.json which maps 
 DIAGRAM 01 — VOLATILE-FIRST DATA PATH
 
 **Diagram (viewBox 780x180):**
-- Agent / TUI → CodeWriter → /tmp/kilas tmpfs 1G → Housekeeper → Physical
-- open, edit, ask → Singleton + ETS lock → All File I/O • 0.05ms → 60s tick • WAL → atomic rename
+- Agent / TUI → CodeWriter → /tmp/kilas workspace 1G (f2fs) → Housekeeper → Physical
+- open, edit, ask → Singleton + ETS lock → All File I/O • ~1ms • 60s tick • WAL → atomic rename
 - MemGit ETS :memgit_*  +  DuckDB ast_nodes  +  graph_edges + libgraph
 - commit <0.5ms • BlastRadius <2ms • No disk
 
@@ -127,9 +127,9 @@ kilas/
 ├── mix.exs (deps: ex_tree_sitter, rustler 0.32, duckdbex 0.3.7, libgraph 0.16, finch 0.19, req 0.5, jason 1.4, owl 0.12, ratatouille 0.5 [optional])
 ├── .kilas.json (template registry: {"go": "templates/go.json", ...})
 ├── lib/kilas/
-│   ├── application.ex (Supervisor: TmpfsManager, MemGit, DuckDBServer, GraphServer, TreeSitterServer, ShadowRegistry, CodeWriter.Coordinator, Housekeeper, Router)
+│   ├── application.ex (Supervisor: WorkspaceManager, MemGit, DuckDBServer, GraphServer, TreeSitterServer, ShadowRegistry, CodeWriter.Coordinator, Housekeeper, Router)
 │   ├── storage/
-│   │   ├── tmpfs_manager.ex (mount /tmp/kilas, 1GB, recover_from_disk)
+│   │   ├── workspace_manager.ex (/tmp/kilas f2fs dir, 1GB quota, recover_from_disk)
 │   │   ├── memgit.ex (ETS :memgit_commits, :memgit_trees, :memgit_blobs, commit/log/diff/status/rollback)
 │   │   ├── duckdb_server.ex (AST nodes, parent context envelope, FTS)
 │   │   ├── graph_server.ex (project graph_edges into libgraph: CALLS, TESTED_BY, DEPENDS_ON, IMPORTS, HAS_VULN, MODIFIED_IN)
@@ -157,7 +157,7 @@ kilas/
 │   │   ├── router.ex (intent classification: query, generate, debug, profile, env, security, survival, tutor, collab, deploy, repl, open, edit)
 │   │   ├── query_engine.ex (GraphRAG over DuckDB+libgraph, <10ms, parent_context)
 │   │   ├── debug_engine.ex (get_runtime_value from last failed run bindings stored in ETS :runtime_bindings)
-│   │   ├── profile_engine.ex (fprof / go pprof / cargo flamegraph in tmpfs, store in DuckDB)
+│   │   ├── profile_engine.ex (fprof / go pprof / cargo flamegraph in workspace, store in DuckDB)
 │   │   ├── env_doctor.ex (EnvGraph error regex -> apt package -> install via Port)
 │   │   ├── security_engine.ex (vuln traversal Package->CVE via libgraph)
 │   │   ├── survival_engine.ex (nand_writes, battery, oom_risk gauges, thermal)
@@ -165,8 +165,8 @@ kilas/
 │   │   └── collab_engine.ex (MemGit timeline + lock reservations)
 │   ├── tools/
 │   │   ├── http.ex (Finch, not curl, pool, timeout 5s)
-│   │   ├── live_lab.ex (IEx persistent Port in /tmp/kilas_lab RAM, eval without commit)
-│   │   └── repl.ex (eval in tmpfs, no persistence)
+│   │   ├── live_lab.ex (IEx persistent Port in /tmp/kilas_lab, eval without commit)
+│   │   └── repl.ex (eval in workspace, no persistence)
 │   └── tui/
 │       └── cli.ex (Owl TUI, commands: open, edit, ask, debug, profile, env fix, explain, push, status)
 ├── native/
@@ -185,7 +185,7 @@ kilas/
 │   └── policies/
 │       └── anti_patterns.json (raw SQL interpolation, unhandled Task.async, fmt.Sprintf %s with SQL, etc)
 └── test/
-    ├── tmpfs_manager_test.exs
+    ├── workspace_manager_test.exs
     ├── memgit_test.exs
     ├── blast_radius_test.exs
     ├── query_test.exs
@@ -355,12 +355,12 @@ ETS read <0.01ms • MemGit commit <0.5ms • libgraph CALLS BFS depth≤5 <2ms 
 
 4.1
 
-Volatile-First Init — TmpfsManager
+Volatile-First Init — WorkspaceManager
 
 DIRTY_CPU NIF • ETS • <1ms
 
 ```elixir
-defmodule Kilas.Storage.TmpfsManager do
+defmodule Kilas.Storage.WorkspaceManager do
   use GenServer
 
   def start_link(opts) do
@@ -368,29 +368,32 @@ defmodule Kilas.Storage.TmpfsManager do
   end
 
   def init(_opts) do
-    tmpfs_path = "/tmp/kilas"
+    workspace_path = "/tmp/kilas"
     physical_path = get_physical_path() # e.g. /data/data/com.termux/files/home/storage/kilas or ./kilas_physical
 
-    File.mkdir_p!(tmpfs_path)
+    # Plain f2fs dir + 1GB quota. No tmpfs: PRoot has none (validated
+    # 2026-09-12 — no /dev/shm on host, mount impossible rootless).
+    # Hot files are served by the kernel page cache (~1.2ms small reads).
+    File.mkdir_p!(workspace_path)
+    :ok = check_quota(workspace_path)
 
-    # Try tmpfs mount, fallback to plain dir with quota tracking if no root
-    case System.cmd("mount", ["-t", "tmpfs", "-o", "size=1G", "tmpfs", tmpfs_path], stderr_to_stdout: true) do
-      {_, 0} -> :ok
-      {err, _} ->
-        Logger.warning("tmpfs mount failed: #{err}, using fallback dir with 1GB quota")
-        File.mkdir_p!(fallback_path())
-    end
+    recover_from_disk(physical_path, workspace_path)
 
-    recover_from_disk(physical_path, tmpfs_path)
-
-    {:ok, %{tmpfs: tmpfs_path, physical: physical_path, writes: 0}}
+    {:ok, %{workspace: workspace_path, physical: physical_path, writes: 0}}
   end
 
-  def recover_from_disk(physical, tmpfs) do
+  def recover_from_disk(physical, workspace) do
     if File.exists?(physical) do
-      # rsync physical -> tmpfs, preserve perms, exclude shadow tmp
-      System.cmd("rsync", ["-a", "--exclude=.kilas_shadow_tmp", "#{physical}/", "#{tmpfs}/"])
+      # rsync physical -> workspace, preserve perms, exclude shadow tmp
+      System.cmd("rsync", ["-a", "--exclude=.kilas_shadow_tmp", "#{physical}/", "#{workspace}/"])
     end
+  end
+
+  # 1GB quota, checked at boot and by Housekeeper after sync
+  def check_quota(workspace_path) do
+    {size, _} = System.cmd("du", ["-sb", workspace_path])
+    {bytes, _} = Integer.parse(size)
+    if bytes > 1_000_000_000, do: {:error, :quota_exceeded}, else: :ok
   end
 
   def get_physical_path do
@@ -707,16 +710,16 @@ defmodule Kilas.Storage.Housekeeper do
   end
 
   def do_sync do
-    tmpfs = "/tmp/kilas"
-    physical = Kilas.Storage.TmpfsManager.get_physical_path()
+    workspace = "/tmp/kilas"
+    physical = Kilas.Storage.WorkspaceManager.get_physical_path()
     shadow_tmp = "/tmp/kilas/.kilas_shadow_tmp"
     journal_path = "#{shadow_tmp}/shadow.journal"
 
     File.mkdir_p!(shadow_tmp)
     File.rm_rf!(shadow_tmp)
 
-    # 1. Copy tmpfs -> shadow_tmp (exclude self)
-    System.cmd("rsync", ["-a", "--exclude=.kilas_shadow_tmp", "#{tmpfs}/", "#{shadow_tmp}/"])
+    # 1. Copy workspace -> shadow_tmp (exclude self)
+    System.cmd("rsync", ["-a", "--exclude=.kilas_shadow_tmp", "#{workspace}/", "#{shadow_tmp}/"])
 
     # 2. Write WAL (MemGit log since last sync)
     wal = Kilas.Storage.MemGit.get_commits_since_last_sync()
@@ -769,7 +772,7 @@ DIAGRAM 02 — ZERO-FORK LOOP ARCHITECTURE
 | INTENT | EXAMPLE QUERY | INTERNAL FLOW | LATENCY / FORKS |
 |---|---|---|---|
 | Query | "How to add login?" | Router → QueryEngine GraphRAG DuckDB+libgraph → parent_context envelope → answer + file:line | <10ms • 0 fork |
-| Generate | "Add hash_password()" | CodeWriter reserve lock → PolicyGate → tmpfs patch → TreeSitter check → MemGit ETS → TIA 2 tests 8-25ms | <25ms TIA • 0 fork if no test |
+| Generate | "Add hash_password()" | CodeWriter reserve lock → PolicyGate → workspace patch → TreeSitter check → MemGit ETS → TIA 2 tests 8-25ms | <25ms TIA • 0 fork if no test |
 | Debug | "Why user_id nil at auth.ex:42?" | DebugEngine ETS :runtime_bindings lookup node_id → stacktrace + history + last values | <15ms • 0 fork |
 | Profile | "Why login slow?" | ProfileEngine fprof/go pprof/cargo flamegraph in /tmp/kilas_lab RAM → DuckDB store → 80% hash_password | <100ms profile • 1 fork |
 | Env Fix | "Fix my env" | EnvDoctor EnvGraph error regex → apt package → install via persistent Port → retry compile | <5s apt • 1 fork |
@@ -781,7 +784,7 @@ DIAGRAM 02 — ZERO-FORK LOOP ARCHITECTURE
 | Deploy | "Push" | Housekeeper sync() atomic rsync + WAL shadow.journal + git push Port | 60s tick • 1 fork push |
 | Open | "Open auth.go" | TreeSitterServer parse if needed → DuckDB → return file + ast_nodes | <5ms • 0 fork |
 | Edit | "Edit hash_password impl" | Same as Generate, but with existing symbol range replacement | <25ms • 0 fork |
-| Status | "Status" | TmpfsManager + Housekeeper + locks + MemGit log + battery gauge | <5ms • 0 fork |
+| Status | "Status" | WorkspaceManager + Housekeeper + locks + MemGit log + battery gauge | <5ms • 0 fork |
 
 ROUTER — INTENT CLASSIFICATION
 
@@ -840,7 +843,7 @@ FULL DEVELOPER LOOP — 14 INTERACTIONS ACROSS 6 LAYERS
 
 Code: Query (GraphRAG) → Generate (Single-Writer) → TIA (BlastRadius) → Test (Port)
 
-Runtime: Debug (bindings ETS) → Profile (fprof/pprof in tmpfs) → REPL (LiveLab IEx RAM)
+Runtime: Debug (bindings ETS) → Profile (fprof/pprof in workspace) → REPL (LiveLab IEx)
 
 Environment: EnvDoctor (regex→apt→Port) → Survival (battery/thermal/nand gauges)
 
@@ -904,8 +907,8 @@ end
 # config/config.exs
 import Config
 config :kilas,
-  tmpfs_path: "/tmp/kilas",
-  tmpfs_size: "1G",
+  workspace_path: "/tmp/kilas",
+  workspace_size: "1G",
   memory_limit: 512 * 1024 * 1024, # 512MB BEAM
   dirty_schedulers: 4,
   shadow_sync_interval: 60_000,
@@ -1012,7 +1015,7 @@ Create project, add deps to mix.exs, create priv/templates, priv/policies. mix d
 
 Storage layer first
 
-TmpfsManager (mount /tmp/kilas, recover_from_disk), MemGit ETS (3 tables, commit/log/diff/status/rollback), DuckDBServer (create ast_nodes table, insert/query), GraphServer (project graph_edges into libgraph), Housekeeper skeleton (60s timer, no sync yet). Test: test/tmpfs_manager_test.exs, memgit_test.exs must pass.
+WorkspaceManager (/tmp/kilas dir + 1GB quota, recover_from_disk), MemGit ETS (3 tables, commit/log/diff/status/rollback), DuckDBServer (create ast_nodes table, insert/query), GraphServer (project graph_edges into libgraph), Housekeeper skeleton (60s timer, no sync yet). Test: test/workspace_manager_test.exs, memgit_test.exs must pass.
 
 3
 
@@ -1054,7 +1057,7 @@ HTTP via Finch (not curl), LiveLab IEx persistent Port in /tmp/kilas_lab RAM eva
 
 Housekeeper 60s sync
 
-Implement full sync(): tmpfs -> .kilas_shadow_tmp -> rsync -> physical -> git push via persistent Port, WAL shadow.journal, thermal/battery pause. Test: modify file in /tmp/kilas, trigger sync, check physical has file.
+Implement full sync(): workspace -> .kilas_shadow_tmp -> rsync -> physical -> git push via persistent Port, WAL shadow.journal, thermal/battery pause. Test: modify file in /tmp/kilas, trigger sync, check physical has file.
 
 10
 
@@ -1076,7 +1079,7 @@ test/query_test.exs, debug_test.exs, profile_test.exs, env_doctor_test.exs, secu
 
 VERIFICATION CHECKPOINTS
 
-After each layer: mix test. After storage: tmpfs read <0.05ms, MemGit commit <0.5ms. After AST: Tree-sitter parse Go file <5ms. After TIA: BlastRadius <2ms. After compiler: Port reuse confirmed (1 fork total). After code_writer: surgical patch microsecond. Full loop end-to-end <50ms for Query+Generate+TIA.
+After each layer: mix test. After storage: workspace file read <2ms (validated f2fs), MemGit commit <0.5ms. After AST: Tree-sitter parse Go file <5ms. After TIA: BlastRadius <2ms. After compiler: Port reuse confirmed (1 fork total). After code_writer: surgical patch microsecond. Full loop end-to-end <50ms for Query+Generate+TIA.
 
 ## 08 — Performance Targets — Poco F5 Pro
 
@@ -1091,7 +1094,7 @@ After each layer: mix test. After storage: tmpfs read <0.05ms, MemGit commit <0.
 | Survival gauges | <5ms | 0 | Read /sys/class/power_supply, /proc/meminfo, thermal_zone |
 | Tutor (story+mermaid) | <10ms | 0 | Simplified graph + precomputed parent_context |
 | MemGit commit | <0.5ms | 0 | ETS insert only, no disk |
-| tmpfs read | <0.05ms | 0 | File.read! from tmpfs |
+| Workspace file read | <2ms | 0 | File.read! from /tmp/kilas (f2fs; hot files via page cache — validated 1.2ms) |
 | Tree-sitter parse (1 file) | <5ms | 0 | Rustler NIF dirty_cpu, not CLI |
 | BlastRadius | <2ms | 0 | libgraph CALLS BFS depth≤5 (benchmark required) |
 | ShadowSync 60s | ~200ms | 1 (git push) | Atomic rsync + WAL, not during loop |
@@ -1101,24 +1104,20 @@ After each layer: mix test. After storage: tmpfs read <0.05ms, MemGit commit <0.
 
 ## 09 — Mobile Survival Spec — NAND / OOM / Thermal
 
-TMPFS MOUNT + FALLBACK
+WORKSPACE + QUOTA (no tmpfs)
 
 ```elixir
-# Try tmpfs, fallback if no root (PRoot)
-def mount_tmpfs do
-  case System.cmd("mount", ["-t", "tmpfs", "-o", "size=1G", "tmpfs", "/tmp/kilas"]) do
-    {_, 0} -> {:ok, :tmpfs}
-    {err, _} ->
-      fallback = "/data/data/com.termux/files/usr/tmp/kilas"
-      File.mkdir_p!(fallback)
-      # Track quota manually 1GB
-      {:ok, :fallback, fallback}
-  end
+# Plain f2fs dir + quota. PRoot has no usable tmpfs (validated:
+# /dev/shm absent on Android host, mounts impossible rootless).
+def ensure_workspace do
+  workspace = "/tmp/kilas"
+  File.mkdir_p!(workspace)
+  check_quota(workspace)
 end
 
-# Quota tracking for fallback
-def check_quota(fallback_path) do
-  {size, _} = System.cmd("du", ["-sb", fallback_path])
+# 1GB quota
+def check_quota(workspace_path) do
+  {size, _} = System.cmd("du", ["-sb", workspace_path])
   {bytes, _} = Integer.parse(size)
   if bytes > 1_000_000_000, do: {:error, :quota_exceeded}, else: :ok
 end
@@ -1130,9 +1129,9 @@ OOM HANDLING — BEAM HEART
 
 • BEAM heart enabled: HEART_BEAT_TIMEOUT=30
 
-• On restart: TmpfsManager.recover_from_disk() rsync physical → tmpfs
+• On restart: WorkspaceManager.recover_from_disk() rsync physical → workspace
 
-• ETS tables recreated, DuckDB reopen from /tmp/kilas/.kilas_db (tmpfs but WAL in physical); GraphServer rebuilds libgraph from graph_edges
+• ETS tables recreated, DuckDB reopen from /tmp/kilas/.kilas_db (workspace on f2fs; WAL in physical); GraphServer rebuilds libgraph from graph_edges
 
 • No data loss: last ShadowSync max 60s ago
 
@@ -1170,7 +1169,7 @@ NAND PROTECTION
 
 • WAL shadow.journal batched, not per commit
 
-• DuckDB files in tmpfs, flushed only on ShadowSync (libgraph held in BEAM memory, rebuilt on boot)
+• DuckDB file in workspace (f2fs), flushed only on ShadowSync (libgraph held in BEAM memory, rebuilt on boot)
 
 • Git push via Port, not shell loop
 
@@ -1182,8 +1181,8 @@ TEST FILES — EACH INTERACTION
 
 ```text
 test/
-├── tmpfs_manager_test.exs
-│   └── mount, fallback, recover_from_disk, quota
+├── workspace_manager_test.exs
+│   └── ensure workspace dir, quota, recover_from_disk
 ├── memgit_test.exs
 │   └── commit <0.5ms, log, diff, status, rollback
 ├── blast_radius_test.exs
@@ -1208,7 +1207,7 @@ test/
 │   └── lock reservation, MemGit timeline
 ├── all_interaction_test.exs
 │   └── Full loop: Query->Generate->TIA->Debug->Push
-└── test_helper.exs (setup tmpfs, ETS, DuckDB, GraphServer)
+└── test_helper.exs (setup workspace, ETS, DuckDB, GraphServer)
 
 # Each test must use /tmp/kilas, not physical
 # mix test --trace should show <50ms per interaction
@@ -1222,7 +1221,7 @@ defmodule Kilas.QueryTest do
   use ExUnit.Case
 
   setup do
-    Kilas.Storage.TmpfsManager.init([])
+    Kilas.Storage.WorkspaceManager.init([])
     Kilas.Storage.DuckDBServer.insert_node(%{
       id: "lib/auth.ex::hash_password",
       filepath: "lib/auth.ex",
@@ -1255,7 +1254,7 @@ FINAL VERIFICATION
 
 • No test forks more than 1 (check via :os.getpid)
 
-• tmpfs read <0.05ms measured
+• workspace file read <2ms measured (f2fs, validated)
 
 • Battery drain <5%/hr idle loop
 
@@ -1282,37 +1281,37 @@ DIAGRAM 03 — FULL LAYER MAP
 - BlastRadius GraphServer, TreeSitter NIF, GenericAdapter, Persis
 - tentPort, ShadowRegistry
 - Storage — Volatile-First
-- TmpfsManager 1GB, MemGit ETS, DuckDB ast_nodes + graph_edges, libgraph gra
+- WorkspaceManager 1GB (f2fs), MemGit ETS, DuckDB ast_nodes + graph_edges, libgraph gra
 - ph, Housekeeper 60s ShadowSync
 
 EXECUTABLE PROMPT — COPY PASTE TO CLAUDE CODE
 
 ```text
-You are building Kilas v2.0 exactly per this spec. Build file by file in order Section 7. Do not skip. Use persistent Ports for heavy compilers, BEAM-native for fast path. All work in /tmp/kilas tmpfs. No bash sh -c loops. Verify each component with mix test before next.
+You are building Kilas v2.0 exactly per this spec. Build file by file in order Section 7. Do not skip. Use persistent Ports for heavy compilers, BEAM-native for fast path. All work in /tmp/kilas workspace (plain f2fs dir — PRoot has no tmpfs, do not attempt mounts). No bash sh -c loops. Verify each component with mix test before next.
 
 INVARIANTS:
-- Volatile-First: /tmp/kilas tmpfs 1GB, recover_from_disk()
+- Volatile-First: hot state in ETS/MemGit (BEAM RAM); /tmp/kilas workspace 1GB quota on f2fs, recover_from_disk()
 - Zero-Fork: ≤1 fork/min, 90% ETS/DuckDB/libgraph/NIF/Finch, 10% persistent Ports
 - Single-Writer: CodeWriter GenServer singleton {:global}, ETS :ast_locks per function TTL 30s
 - Language Agnostic: Tree-sitter NIF + .kilas.json + GenericAdapter EEx + auto-detect go.mod/Cargo.toml/build.gradle/mix.exs/package.json
 
 BUILD ORDER:
 1. mix new kilas --sup, deps, priv/templates, priv/policies
-2. storage layer: TmpfsManager, MemGit ETS 3 tables, DuckDBServer ast_nodes + graph_edges, GraphServer libgraph projection, Housekeeper skeleton
+2. storage layer: WorkspaceManager, MemGit ETS 3 tables, DuckDBServer ast_nodes + graph_edges, GraphServer libgraph projection, Housekeeper skeleton
 3. ast layer: TreeSitterServer Rustler NIF dirty_cpu, Granularity, ParentContext envelope, PolicyGate <1ms anti_patterns.json
 4. tia layer: BlastRadius libgraph CALLS BFS depth≤5, TestRunner GenericAdapter, FocusedSignal 200 token hint
 5. compiler layer: ShadowRegistry auto-detect, GenericAdapter EEx, PersistentPort Port.open spawn_executable reuse, ShadowServer
 6. code_writer layer: Coordinator singleton reserve_ast_lock apply_surgical_patch binary_part, Patcher, LockManager
-7. interrogation layer: Router intent + 8 engines QueryEngine GraphRAG <10ms, DebugEngine :runtime_bindings, ProfileEngine fprof/pprof tmpfs, EnvDoctor regex->apt->Port, SecurityEngine Package->Vuln, SurvivalEngine gauges, TutorEngine story+mermaid, CollabEngine timeline
+7. interrogation layer: Router intent + 8 engines QueryEngine GraphRAG <10ms, DebugEngine :runtime_bindings, ProfileEngine fprof/pprof workspace, EnvDoctor regex->apt->Port, SecurityEngine Package->Vuln, SurvivalEngine gauges, TutorEngine story+mermaid, CollabEngine timeline
 8. tools: http Finch not curl, live_lab IEx persistent Port /tmp/kilas_lab RAM eval no commit
-9. Housekeeper 60s sync: tmpfs -> .kilas_shadow_tmp -> rsync -> physical atomic + WAL shadow.journal + git push Port, pause battery<20% temp>45C
+9. Housekeeper 60s sync: workspace -> .kilas_shadow_tmp -> rsync -> physical atomic + WAL shadow.journal + git push Port, pause battery<20% temp>45C
 10. TUI CLI Owl: open edit ask debug profile env fix explain push status
 11. templates 8x JSON + policies anti_patterns.json
 12. tests 14 interactions, full loop <50ms
 
-PERF TARGETS: Query <10ms, Generate <25ms TIA, Debug <15ms, Profile <100ms, Env <5s, Security <10ms, Survival <5ms, MemGit <0.5ms, tmpfs <0.05ms, BlastRadius <2ms, Zero NAND during loop, Battery <5%/hr, Forks <1/min.
+PERF TARGETS: Query <10ms, Generate <25ms TIA, Debug <15ms, Profile <100ms, Env <5s, Security <10ms, Survival <5ms, MemGit <0.5ms, workspace file read <2ms, BlastRadius <2ms, Zero NAND during loop, Battery <5%/hr, Forks <1/min.
 
-MOBILE: tmpfs fallback /data/data/com.termux/files/usr/tmp/kilas 1GB quota, BEAM heart OOM recover_from_disk, thermal pause, NAND only atomic rsync.
+MOBILE: workspace /tmp/kilas on f2fs with 1GB quota (no tmpfs in PRoot — validated), BEAM heart OOM recover_from_disk, thermal pause, NAND only atomic rsync.
 
 TEST: Each interaction test in test/*_test.exs, all pass, no sh -c loops.
 
@@ -1345,7 +1344,7 @@ KILAS v2.0 — COMPLETE SPEC READY FOR CLAUDE CODE
 
 Volatile-First Guarantee
 
-All edits in /tmp/kilas tmpfs, 1GB. Physical only via Housekeeper 60s atomic rsync + WAL. No fsync during loop. Recover on OOM via rsync physical→tmpfs. Fallback quota dir if no root.
+Hot state in BEAM RAM (ETS/MemGit). All edits in /tmp/kilas workspace — plain f2fs dir, 1GB quota (PRoot has no tmpfs; validated). Physical only via Housekeeper 60s atomic rsync + WAL. No fsync during loop. Recover on OOM via rsync physical→workspace.
 
 Zero-Fork Guarantee
 
@@ -1363,6 +1362,6 @@ KILAS v2.0 • BEAM + Elixir + Rust + Go • POCO F5 PRO 12GB • EXECUTABLE SPE
 
 Paste into Claude Code: “Build Kilas v2.0 exactly per this spec, file by file, no shortcuts”
 
-© Kilas Volatile-First Harness • tmpfs 1GB • ShadowSync 60s • Zero-Fork • Single-Writer
+© Kilas Volatile-First Harness • workspace 1GB (f2fs) • ShadowSync 60s • Zero-Fork • Single-Writer
 
 SPEC VALID • READY TO PASTE

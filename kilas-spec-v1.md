@@ -4,13 +4,13 @@
 
 - **BEAM VM / Elixir**
 - **PRoot Ubuntu / AArch64**
-- **tmpfs Volatile-First**
+- **Volatile-First (BEAM RAM + f2fs workspace)**
 
 > # KILAS ARCHITECTURE & IMPLEMENTATION SPECIFICATION
 >
 > - Target: Mobile-Native PRoot Ubuntu on Android (Linux AArch64)
 > - Core Runtime: BEAM VM (Erlang/OTP) via Elixir
-> - Storage: Volatile-First (tmpfs) with Async Shadow-Sync
+> - Storage: Volatile-First (ETS in BEAM RAM; /tmp/kilas workspace on f2fs — PRoot has no tmpfs) with Async Shadow-Sync
 
 Kilas (Malay for *flash / agile pivot*) is a compiler-grade, high-performance workspace engine designed to run natively within constrained mobile environments. It unifies source code refactoring & AST mutations, personal wiki & markdown knowledge base, project tracking & task graphs, and interactive discussion & ADRs into a single **Everything is a Graph Node** model.
 
@@ -30,7 +30,7 @@ Communicates exclusively via lightweight JSON-RPC intent payloads (`<50 tokens`)
 
 ### THE MAINTAINER • Subconscious / BEAM Engine
 
-Deterministic execution in volatile memory (tmpfs). Handles mutations, graph, vectors, validation.
+Deterministic execution in volatile memory (BEAM RAM: ETS + page-cached f2fs workspace). Handles mutations, graph, vectors, validation.
 
 | Capability | Technology |
 |---|---|
@@ -120,7 +120,8 @@ defmodule Kilas.Application do
   Kilas BEAM Supervisor - Boots volatile-first workspace engine
   for PRoot Ubuntu on Android (AArch64).
 
-  All children operate in /tmp/kilas (tmpfs). Physical flash
+  All children operate in /tmp/kilas (f2fs workspace — PRoot has
+  no tmpfs; hot state lives in BEAM RAM: ETS). Physical flash
   is only touched via async ShadowSync.
   """
   use Application
@@ -128,10 +129,10 @@ defmodule Kilas.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      # 1. RAM disk - must be first
-      Kilas.Storage.TmpfsManager,
+      # 1. Workspace - must be first
+      Kilas.Storage.WorkspaceManager,
 
-      # 2. In-memory Databases (DuckDB + sqlite-vec) in tmpfs
+      # 2. In-memory Databases (DuckDB + sqlite-vec) in workspace
       {Kilas.Context.GraphStore,
        database_path: "/tmp/kilas/db/graph.duckdb",
        pool_size: 2},
@@ -159,60 +160,63 @@ defmodule Kilas.Application do
 end
 ```
 
-### `lib/kilas/storage/tmpfs_manager.ex`
+### `lib/kilas/storage/workspace_manager.ex`
 
-**Module id:** `tmpfs`  
-**Creates /tmp/kilas, mounts tmpfs 512M, ensures subdirs**
+**Module id:** `workspace`  
+**Creates /tmp/kilas on f2fs (512MB quota), ensures subdirs. No tmpfs: PRoot has none (validated 2026-09-12 — /dev/shm absent on the Android host, mounts impossible rootless).**
 
 ```elixir
-defmodule Kilas.Storage.TmpfsManager do
+defmodule Kilas.Storage.WorkspaceManager do
   @moduledoc """
-  Manages volatile RAM disk at /tmp/kilas.
+  Manages the volatile-first workspace at /tmp/kilas.
 
-  On PRoot, mount may fail (no root). In that case we fallback to
-  plain directory - still volatile, but not backed by tmpfs.
-  Protects eMMC/UFS from write amplification.
+  Plain f2fs directory with a 512MB quota - no tmpfs exists in PRoot
+  (no /dev/shm on the host, mounts impossible without root). Volatility
+  comes from the architecture: hot state in ETS (BEAM RAM), workspace
+  files page-cached (~1.2ms small reads), physical flash touched only
+  by ShadowSync. Protects eMMC/UFS from write amplification.
   """
   use GenServer
   require Logger
 
-  @tmpfs_path "/tmp/kilas"
+  @workspace_path "/tmp/kilas"
   @subdirs ["db", "workspace", "cache", "blobs"]
-  @tmpfs_size "512M"
+  @quota_bytes 512 * 1024 * 1024
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def path, do: @tmpfs_path
-  def workspace_path, do: Path.join(@tmpfs_path, "workspace")
-  def db_path, do: Path.join(@tmpfs_path, "db")
+  def path, do: @workspace_path
+  def workspace_path, do: Path.join(@workspace_path, "workspace")
+  def db_path, do: Path.join(@workspace_path, "db")
 
   @impl true
   def init(_opts) do
-    Logger.info("[TmpfsManager] Initializing volatile workspace at #{@tmpfs_path}")
+    Logger.info("[WorkspaceManager] Initializing workspace at #{@workspace_path} (f2fs, #{div(@quota_bytes, 1024 * 1024)}MB quota)")
 
-    :ok = File.mkdir_p!(@tmpfs_path)
-    mount_tmpfs()
+    :ok = File.mkdir_p!(@workspace_path)
+    :ok = check_quota()
     Enum.each(@subdirs, fn dir ->
-      File.mkdir_p!(Path.join(@tmpfs_path, dir))
+      File.mkdir_p!(Path.join(@workspace_path, dir))
     end)
 
-    # Recover from physical if volatile is empty (cold boot / crash)
+    # Recover from physical if workspace is empty (cold boot / crash)
     maybe_recover_from_physical()
 
-    {:ok, %{mounted: true, path: @tmpfs_path}}
+    {:ok, %{path: @workspace_path}}
   end
 
-  defp mount_tmpfs do
-    case System.cmd("mount", ["-t", "tmpfs", "-o", "size=#{@tmpfs_size}", "tmpfs", @tmpfs_path],
-           stderr_to_stdout: true
-         ) do
-      {_out, 0} ->
-        Logger.info("[TmpfsManager] tmpfs mounted #{@tmpfs_size} at #{@tmpfs_path}")
+  # 512MB quota, checked at boot and by Housekeeper after sync
+  def check_quota do
+    {size, _} = System.cmd("du", ["-sb", @workspace_path])
+    {bytes, _} = Integer.parse(size)
 
-      {reason, _} ->
-        Logger.warning("[TmpfsManager] mount failed (PRoot unprivileged): #{reason}. Using plain dir.")
+    if bytes > @quota_bytes do
+      Logger.warning("[WorkspaceManager] quota exceeded: #{bytes} bytes")
+      {:error, :quota_exceeded}
+    else
+      :ok
     end
   end
 
@@ -221,8 +225,8 @@ defmodule Kilas.Storage.TmpfsManager do
     volatile_ws = workspace_path()
 
     if File.ls!(volatile_ws) == [] and File.exists?(physical) do
-      Logger.info("[TmpfsManager] Volatile empty - restoring from #{physical}")
-      Kilas.Storage.ShadowSync.restore_from_disk(physical, @tmpfs_path)
+      Logger.info("[WorkspaceManager] Workspace empty - restoring from #{physical}")
+      Kilas.Storage.ShadowSync.restore_from_disk(physical, @workspace_path)
     end
   end
 end
@@ -238,9 +242,9 @@ defmodule Kilas.Storage.ShadowSync do
   @moduledoc """
   Volatile-First Shadow Sync - Protects flash memory on Android.
 
-  All edits happen in /tmp/kilas (RAM). This module flushes
-  asynchronously to physical storage via rsync, debounced to
-  avoid UFS wear.
+  All edits happen in /tmp/kilas (f2fs workspace, page-cached).
+  This module flushes asynchronously to physical storage via rsync,
+  debounced to avoid UFS wear.
 
   Recovery: on boot, if /tmp/kilas is empty, restore from physical.
   """
@@ -254,12 +258,12 @@ defmodule Kilas.Storage.ShadowSync do
     System.get_env(@physical_root_env) || @default_physical
   end
 
-  @doc "Non-blocking async flush from tmpfs to physical"
-  def sync_to_disk_async(source_tmpfs \\ "/tmp/kilas", target_physical \\ nil) do
+  @doc "Non-blocking async flush from workspace to physical"
+  def sync_to_disk_async(source_workspace \\ "/tmp/kilas", target_physical \\ nil) do
     target = target_physical || physical_root()
 
     Task.Supervisor.start_child(Kilas.Storage.ShadowSyncSupervisor, fn ->
-      Logger.info("[ShadowSync] Flushing #{source_tmpfs} -> #{target}")
+      Logger.info("[ShadowSync] Flushing #{source_workspace} -> #{target}")
       File.mkdir_p!(target)
 
       case System.cmd("rsync", [
@@ -267,7 +271,7 @@ defmodule Kilas.Storage.ShadowSync do
              "--delete",
              "--exclude",
              "db/*.wal",
-             "#{source_tmpfs}/workspace/",
+             "#{source_workspace}/workspace/",
              "#{target}/"
            ],
            stderr_to_stdout: true
@@ -283,9 +287,9 @@ defmodule Kilas.Storage.ShadowSync do
     GenServer.cast(__MODULE__.Debouncer, :schedule_sync)
   end
 
-  def restore_from_disk(physical, tmpfs_target) do
-    Logger.warning("[ShadowSync] Recovery: #{physical} -> #{tmpfs_target}")
-    System.cmd("rsync", ["-avz", "#{physical}/", "#{tmpfs_target}/workspace/"])
+  def restore_from_disk(physical, workspace_target) do
+    Logger.warning("[ShadowSync] Recovery: #{physical} -> #{workspace_target}")
+    System.cmd("rsync", ["-avz", "#{physical}/", "#{workspace_target}/workspace/"])
     :ok
   end
 
@@ -324,7 +328,7 @@ defmodule Kilas.Context.GraphStore do
   @moduledoc """
   Unified Graph Store - Everything is a Node.
 
-  Backend: DuckDB + DuckPGQ for sub-ms graph queries in tmpfs.
+  Backend: DuckDB + DuckPGQ for sub-ms graph queries in workspace.
   Node types: CodeAST, WikiDoc, TaskNode, GitCommit
 
   Edges: CALLS, DOCUMENTS, BLOCKS, REFERENCES, IMPLEMENTS
@@ -486,7 +490,7 @@ end
 ```elixir
 defmodule Kilas.Context.VectorStore do
   @moduledoc """
-  Vector Store - sqlite-vec in tmpfs for semantic retrieval.
+  Vector Store - sqlite-vec in workspace for semantic retrieval.
 
   Stores chunked embeddings for CodeAST + WikiDoc nodes.
   Used by Context Assembler to build LLM prompts <50 tokens
@@ -553,7 +557,7 @@ defmodule Kilas.Context.VectorStore do
         fp
       end)
 
-    # Vacuum to reclaim tmpfs
+    # Vacuum to reclaim workspace space
     Exqlite.Sqlite3.execute(db, "VACUUM")
     {:reply, {:ok, pruned}, state}
   end
@@ -981,7 +985,7 @@ defmodule Kilas.Maintainer.Executor do
 
   defp handle_doc_upsert(params, id) do
     file_name = "#{Slug.slugify(params["title"])}.md"
-    file_path = Path.join([Kilas.Storage.TmpfsManager.workspace_path(), params["category"] || "adrs", file_name])
+    file_path = Path.join([Kilas.Storage.WorkspaceManager.workspace_path(), params["category"] || "adrs", file_name])
 
     File.mkdir_p!(Path.dirname(file_path))
 
@@ -1128,7 +1132,7 @@ defmodule Kilas.MixProject do
       elixir: "~> 1.16",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      description: "Mobile-Native Workspace Engine - BEAM + tmpfs + DuckDB + sqlite-vec",
+      description: "Mobile-Native Workspace Engine - BEAM + f2fs workspace + DuckDB + sqlite-vec",
       package: package()
     ]
   end
@@ -1145,11 +1149,11 @@ defmodule Kilas.MixProject do
       {:jason, "~> 1.4"},
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},
 
-      # DuckDB + DuckPGQ - Unified graph in tmpfs (sub-ms queries)
+      # DuckDB + DuckPGQ - Unified graph in workspace (sub-ms queries)
       # NIF compiled for AArch64
       {:duckdb, "~> 0.1.0"},
 
-      # sqlite-vec - Vector embeddings in tmpfs
+      # sqlite-vec - Vector embeddings in workspace
       {:sqlite_vec, "~> 0.1.0"},
 
       # Tree-sitter Elixir parser (Rust NIF)
@@ -1180,7 +1184,7 @@ end
 
 **CONTRACT GUARANTEES**
 
-- All params validated before tmpfs write
+- All params validated before workspace write
 - Intent payloads <50 tokens — token-efficient
 - Idempotent — safe to retry on PRoot crash
 - Housekeeper notification async, never blocks Architect
@@ -1221,7 +1225,7 @@ end
     "title": "ADR 003: DuckDB Graph Backend",
     "category": "architecture",
     "related_nodes": ["Kilas.Context.GraphStore"],
-    "content": "Decided to use DuckDB + DuckPGQ for sub-millisecond graph queries in tmpfs."
+    "content": "Decided to use DuckDB + DuckPGQ for sub-millisecond graph queries in workspace."
   },
   "id": 102
 }
@@ -1259,10 +1263,9 @@ apt update && apt install -y \
   build-essential erlang elixir git \
   cmake curl sqlite3 libsqlite3-dev rsync
 
-# Create volatile RAM disk workspace
+# Create volatile-first workspace (plain f2fs dir - PRoot has no tmpfs)
 mkdir -p /tmp/kilas
-mount -t tmpfs -o size=512M tmpfs /tmp/kilas \
-  || echo "/tmp/kilas active (PRoot unprivileged fallback)"
+echo "/tmp/kilas active (f2fs, page-cached; hot state in ETS)"
 
 # Verify BEAM on AArch64
 elixir --version
@@ -1285,7 +1288,7 @@ mix compile --force
 KILAS_PHYSICAL_ROOT=~/kilas_repo mix run --no-halt
 
 # Expected logs:
-# [TmpfsManager] tmpfs mounted 512M at /tmp/kilas
+# [WorkspaceManager] workspace ready at /tmp/kilas (f2fs, 512MB quota)
 # [GraphStore] DuckDB ready at /tmp/kilas/db/graph.duckdb
 # [VectorStore] sqlite-vec ready dim=384
 # [RPC] stdio mode active
@@ -1300,7 +1303,7 @@ When feeding this specification to an automated tool or Claude Code, append:
 > "Read this full specification document carefully. Implement the Kilas Elixir engine as a unified workspace tool for code refactoring, knowledge wiki management, and task graphs.
 >
 > You MUST implement:
-> • The TmpfsManager and ShadowSync modules for physical storage protection.
+> • The WorkspaceManager and ShadowSync modules for physical storage protection.
 > • The ASTMutator module using Tree-sitter byte-offset replacing.
 > • The Housekeeper GenServer for automatic graph (DuckDB) and vector (sqlite-vec) re-indexing.
 > • The JSON-RPC 2.0 contract interfaces for Architect and Maintainer communication.
@@ -1319,7 +1322,7 @@ When feeding this specification to an automated tool or Claude Code, append:
 
 ### Volatile-First Guarantee
 
-No direct writes to physical flash during edit loop. All mutations in /tmp/kilas tmpfs. ShadowSync debounced 2s, janitor vacuum every 60s. Recovery from physical on cold boot if tmpfs empty.
+No direct writes to physical flash during edit loop. All mutations in /tmp/kilas workspace (f2fs; hot state in BEAM RAM). ShadowSync debounced 2s, janitor vacuum every 60s. Recovery from physical on cold boot if workspace empty.
 
 ---
 

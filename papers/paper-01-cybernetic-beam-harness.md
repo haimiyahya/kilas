@@ -18,9 +18,9 @@
 
 Autonomous software engineering (SWE) agents remain bottlenecked by "outsider harnesses" that interact with the filesystem from outside the runtime: disk-bound I/O (45–120 ms per operation), token bloat from re-reading files (2–8k tokens per re-read), and non-deterministic write contention among concurrent agents.
 
-We present the **Cybernetic BEAM Harness**, an insider harness in which the agent control plane *is* the runtime: Erlang/Elixir BEAM (OTP 26, Elixir 1.16). The harness models the environment as lightweight BEAM actors (GenServer/GenStateMachine, <1 KB initial heap), sustaining 2,000+ concurrent actors. Files never touch disk during execution: they live as Elixir binaries in ETS and as immutable objects in MemGit, a content-addressed in-memory Git (checkout 0.06 ms), resident on a tmpfs RAM-disk workspace (8 GB). A single-writer **CodeWriter Coordinator** serializes mutations via message passing, eliminating write races by construction. A **Pre-Flight AST Policy Gatekeeper** rejects policy-violating mutations in <1 ms with surgical notices, before any side effect. A **Target Test Impact Engine (TIA)** uses a compile-time dependency graph to select only affected tests, achieving a 93% test reduction (18.4 s → 1.2 s on a 412-module / 1,840-test corpus).
+We present the **Cybernetic BEAM Harness**, an insider harness in which the agent control plane *is* the runtime: Erlang/Elixir BEAM (OTP 26, Elixir 1.16). The harness models the environment as lightweight BEAM actors (GenServer/GenStateMachine, <1 KB initial heap), sustaining 2,000+ concurrent actors. Files never touch disk during execution: they live as Elixir binaries in ETS and as immutable objects in MemGit, a content-addressed in-memory Git (checkout 0.06 ms), resident in BEAM RAM, with the f2fs workspace page-cached — PRoot on this device has no tmpfs (validated 2026-09-12). A single-writer **CodeWriter Coordinator** serializes mutations via message passing, eliminating write races by construction. A **Pre-Flight AST Policy Gatekeeper** rejects policy-violating mutations in <1 ms with surgical notices, before any side effect. A **Target Test Impact Engine (TIA)** uses a compile-time dependency graph to select only affected tests, achieving a 93% test reduction (18.4 s → 1.2 s on a 412-module / 1,840-test corpus).
 
-End-to-end mutation latency is **0.42 ms median (p99 1.8 ms)** — a **180×** improvement over disk-baseline outsider harnesses — validated on two platforms: an 8-core x86_64 workstation (32 GB) and a Poco F5 Pro smartphone (Snapdragon 8+ Gen 1, 12 GB, proot-distro Ubuntu 22.04, tmpfs 8 GB).
+End-to-end mutation latency is **0.42 ms median (p99 1.8 ms)** — a **180×** improvement over disk-baseline outsider harnesses — validated on two platforms: an 8-core x86_64 workstation (32 GB) and a Poco F5 Pro smartphone (Snapdragon 8+ Gen 1, 12 GB, proot-distro Ubuntu 22.04, f2fs workspace).
 
 ---
 
@@ -34,7 +34,7 @@ End-to-end mutation latency is **0.42 ms median (p99 1.8 ms)** — a **180×** i
 
 ### 1.2 The inversion
 
-> **BEAM processes orchestrate agents. Files cease to exist on disk during execution; they live as Elixir binaries in ETS and as immutable objects in MemGit, resident in tmpfs.**
+> **BEAM processes orchestrate agents. Files cease to exist on disk during execution; they live as Elixir binaries in ETS and as immutable objects in MemGit, resident in BEAM RAM (workspace files on f2fs, page-cached).**
 
 The harness is "cybernetic": agent, state, and policy form a single feedback loop inside one runtime, with sub-millisecond signal propagation.
 
@@ -50,7 +50,7 @@ The harness is an OTP supervision tree with the following components:
 | **CodeWriter Coordinator** | Single-writer GenServer serializing all mutations |
 | **ShadowCompiler** | AST caching in `:persistent_term`, in-RAM Dialyzer PLT; <4 ms incremental compile |
 | **Multi-Tier Knowledge Graph** | ETS / CubDB / Vector tiers; 12M edges, <0.3 ms lookup |
-| **RAM Disk Workspace** | tmpfs + MemGit; zero disk I/O during execution |
+| **Volatile Workspace** | ETS + MemGit in BEAM RAM; f2fs workspace page-cached, physical repo touched only by ShadowSync |
 | **Target Test Impact Engine (TIA)** | Dependency-graph test selection; 93% reduction |
 | **Message bus** | 0.02 ms dispatch |
 | **Telemetry** | p50 0.18 ms, p99 0.92 ms |
@@ -82,7 +82,7 @@ end
 
 ### 2.2 Zero-Disk Memory Architecture
 
-- **tmpfs workspace:** `/mnt/ram`, 8 GB. No persistence across boot — by design (ephemeral execution environments).
+- **Volatile workspace:** hot state in BEAM RAM (ETS + MemGit); workspace files in `/tmp/kilas` on f2fs, served by the kernel page cache (small reads ~1.2ms validated), physical repo synced by ShadowSync. No tmpfs in PRoot — validated 2026-09-12.
 - **MemGit:** content-addressed, ETS-backed in-memory Git. Checkout = ETS lookup + binary copy, **0.06 ms**.
 - **ShadowCompiler:** AST in `:persistent_term` + in-RAM Dialyzer PLT; **<4 ms** incremental compile.
 - **Copy-on-Write branching:** branch creation is an O(1) pointer operation.
@@ -174,4 +174,4 @@ Artifacts: `github.com/haimiyahya/kilas`
 
 ---
 
-*Known gaps to revisit (flagged at extraction, not yet fixed): figure diagrams, and verification of references/benchmarks against real sources.*
+*Known gaps to revisit (flagged at extraction, not yet fixed): figure diagrams, and verification of references/benchmarks against real sources. tmpfs references were rewritten 2026-09-12 after validation proved PRoot on this device has no writable tmpfs (see `.tools/validate/RESULTS.md` row 1) — hot state lives in BEAM RAM; workspace files on f2fs.*
