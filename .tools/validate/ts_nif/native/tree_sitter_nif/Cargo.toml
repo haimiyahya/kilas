@@ -1,0 +1,16 @@
+[package]
+name = "tree_sitter_nif"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.34"
+tree-sitter = "0.24"
+tree-sitter-go = "0.23"
+
+proc-macro2 = "=1.0.106"
+quote = "=1.0.46"
+syn = "=2.0.118"

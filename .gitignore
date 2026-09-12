@@ -2,3 +2,16 @@
 .tools/bench/data/
 .tools/bench/progress.log
 .tools/bench/run_*.sql
+.tools/validate/data/
+.tools/validate/progress.log
+.tools/validate/models/
+.tools/validate/run_*.sql
+.tools/validate/**/*.log
+.tools/validate/ts_nif/_build/
+.tools/validate/ts_nif/deps/
+.tools/validate/ts_nif/priv/
+.tools/validate/ts_nif/native/*/target/
+.tools/validate/ts_c_nif/*.so
+.tools/validate/ts_c_nif/after_rustc.bin
+*.db
+*.wal
