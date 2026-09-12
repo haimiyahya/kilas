@@ -1192,7 +1192,7 @@ After each layer: mix test. After storage: workspace file read <2ms (validated f
 | BlastRadius | <2ms | 0 | libgraph CALLS BFS depth≤5 (~6.6ms measured @~10k edges) |
 | ShadowSync 60s | ~200ms | 1 (git push) | rsync --delete + WAL journal, not during loop |
 | Forks/min | <1 | — | Fast path spawns nothing; slow path execs on demand (3.6ms/fork measured); Finch no fork, NIF no fork |
-| Battery | <5%/hr | — | BEAM 512MB limit, no busy loop, Housekeeper pause (thermal-only in PRoot) |
+| Battery | <5%/hr | — | DuckDB 512MB limit, no busy loop, Housekeeper pause (thermal-only in PRoot) |
 | Synchronous writes | 0 during loop | — | Workspace writeback page-cache batched; repo updated by 60s ShadowSync |
 
 LATENCY VOCABULARY (avoid cross-doc conflation)
@@ -1225,7 +1225,7 @@ end
 
 OOM HANDLING — BEAM HEART
 
-• config.exs memory_limit 512MB
+• config.exs duckdb_memory_limit 512MB (DuckDB); BEAM bounded via heart + OOM restart
 
 • BEAM heart enabled: HEART_BEAT_TIMEOUT=30
 
