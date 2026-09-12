@@ -9,9 +9,13 @@
 .tools/validate/**/*.log
 .tools/validate/ts_nif/_build/
 .tools/validate/ts_nif/deps/
-.tools/validate/ts_nif/priv/
 .tools/validate/ts_nif/native/*/target/
+.tools/validate/ts_nif/priv/*
+!.tools/validate/ts_nif/priv/native/
+.tools/validate/ts_nif/priv/native/*
+!.tools/validate/ts_nif/priv/native/tree_sitter_nif.so
 .tools/validate/ts_c_nif/*.so
+!.tools/validate/ts_c_nif/tree_sitter_cnif.so
 .tools/validate/ts_c_nif/after_rustc.bin
 *.db
 *.wal
